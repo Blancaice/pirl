@@ -58,6 +58,7 @@ class Completion:
 
     text: str
     tool_calls: List[ToolCall] = field(default_factory=list)
+    reasoning: str = ""  # model's thinking/reasoning, empty for non-reasoning models
 
 
 @dataclass(frozen=True)
@@ -165,7 +166,13 @@ def _parse_completion(raw: str) -> Completion:
             )
         )
 
-    return Completion(text=text, tool_calls=tool_calls)
+    # DeepSeek (and some others) expose reasoning as ``reasoning_content``;
+    # other providers use ``reasoning``. Normalize both, default to empty.
+    reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+    if not isinstance(reasoning, str):
+        reasoning = str(reasoning)
+
+    return Completion(text=text, tool_calls=tool_calls, reasoning=reasoning)
 
 
 def client_from_env(env: Optional[Dict[str, str]] = None) -> ChatClient:

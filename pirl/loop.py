@@ -144,6 +144,9 @@ class SelfGenLoop:
     def retire(self, name: str, reason: str = "") -> SkillRecord:
         return self.store.retire(name, reason=reason)
 
+    def reject_candidate(self, name: str, reason: str = "") -> SkillRecord:
+        return self.store.reject_candidate(name, reason=reason)
+
     def on_retrieve(self, name: str) -> SkillRecord:
         return self.store.on_retrieve(name)
 

@@ -13,12 +13,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from .lifecycle import SkillStore
 from .llm import ChatClient, ToolSpec
 from .loop import LoopResult, SelfGenLoop
-from .prompt import format_skills_for_prompt
+from .prompt import PromptSection, format_skills_for_prompt, render_sections
 from .proposal import ToolCall
 from .skills import Skill
 from .tools import ToolRegistry, ToolResult
@@ -54,6 +54,33 @@ FINISH_SPEC = ToolSpec(
 MAX_STEPS = 20
 
 
+@dataclass(frozen=True)
+class StepStart:
+    """The loop is about to make a model request."""
+
+    step: int
+    max_steps: int
+
+
+@dataclass(frozen=True)
+class ToolCalled:
+    """The model asked for a workspace tool call."""
+
+    name: str
+    arguments: str
+
+
+@dataclass(frozen=True)
+class FinishCalled:
+    """The model called the terminal ``finish`` tool."""
+
+    arguments: str
+
+
+# Structured progress event: consumers switch on the concrete type.
+StepEvent = StepStart | ToolCalled | FinishCalled
+
+
 @dataclass
 class RunResult:
     """What one agent run produced."""
@@ -61,6 +88,7 @@ class RunResult:
     answer: str
     outcome: str  # "success" | "failure"
     trace: List[ToolCall] = field(default_factory=list)
+    reasoning: List[str] = field(default_factory=list)  # per-step thinking blocks
     loop_result: Optional[LoopResult] = None
     message: str = ""
 
@@ -89,6 +117,7 @@ class Agent:
         skill_store: SkillStore | None = None,
         system_prompt: str = "",
         max_steps: int = MAX_STEPS,
+        on_step: Callable[[StepEvent], None] | None = None,
     ) -> None:
         self.client = client
         self.skills = list(skills)
@@ -97,16 +126,31 @@ class Agent:
         self.skill_store = skill_store
         self.system_prompt = system_prompt
         self.max_steps = max_steps
+        self.on_step = on_step
         self._retrieved: Set[str] = set()
+        self._reasoning_log: List[str] = []
 
-    def _system_message(self) -> str:
-        parts = [BASE_SYSTEM]
+    def _emit(self, event: StepEvent) -> None:
+        if self.on_step is not None:
+            self.on_step(event)
+
+    def _system_sections(self) -> List[PromptSection]:
+        """Build the stable, ordered system-prompt prefix.
+
+        ``persona`` (BASE_SYSTEM) is fixed; ``rules`` (``system_prompt``) and
+        ``skills`` are appended as separate sections — never spliced into the
+        persona — so adding or removing a rule only touches its own section.
+        """
+        sections = [PromptSection("persona", BASE_SYSTEM)]
         if self.system_prompt:
-            parts.append(self.system_prompt)
+            sections.append(PromptSection("rules", self.system_prompt))
         skills_block = format_skills_for_prompt(self.skills, file_read_tool="read")
         if skills_block:
-            parts.append(skills_block)
-        return "\n".join(parts)
+            sections.append(PromptSection("skills", skills_block))
+        return sections
+
+    def _system_message(self) -> str:
+        return render_sections(self._system_sections())
 
     def _tool_specs(self) -> List[ToolSpec]:
         specs = self.tools.specs() if self.tools else []
@@ -129,6 +173,7 @@ class Agent:
 
     def run(self, user_message: str) -> RunResult:
         self._retrieved.clear()
+        self._reasoning_log.clear()
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": self._system_message()},
             {"role": "user", "content": user_message},
@@ -136,8 +181,11 @@ class Agent:
         tool_specs = self._tool_specs()
         trace: List[ToolCall] = []
 
-        for _ in range(self.max_steps):
+        for step in range(1, self.max_steps + 1):
+            self._emit(StepStart(step, self.max_steps))
             completion = self.client.complete(messages, tools=tool_specs)
+            if completion.reasoning:
+                self._reasoning_log.append(completion.reasoning)
             if not completion.tool_calls:
                 return self._close(trace, "success", completion.text)
 
@@ -160,6 +208,7 @@ class Agent:
 
             for tc, call_id in zip(completion.tool_calls, call_ids):
                 if tc.name == FINISH_NAME:
+                    self._emit(FinishCalled(tc.arguments))
                     args = _parse_args(tc.arguments)
                     if isinstance(args, str):
                         return self._close(
@@ -172,6 +221,7 @@ class Agent:
                     )
 
                 trace.append(ToolCall(tc.name, tc.arguments))
+                self._emit(ToolCalled(tc.name, tc.arguments))
                 args = _parse_args(tc.arguments)
                 if isinstance(args, str):
                     result = ToolResult("", args)
@@ -207,4 +257,6 @@ class Agent:
         loop_result = None
         if self.self_gen is not None:
             loop_result = self.self_gen.on_run_end(trace, outcome)
-        return RunResult(answer, outcome, trace, loop_result, message)
+        return RunResult(
+            answer, outcome, trace, list(self._reasoning_log), loop_result, message
+        )

@@ -10,9 +10,28 @@ can only be invoked explicitly.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable, Literal
 
 from .skills import Skill
+
+@dataclass(frozen=True)
+class PromptSection:
+    """One named, stable chunk of the system prompt.
+
+    The system prompt is a fixed ordered list of sections (stable prefix).
+    Adding context means appending a new section, never rewriting the persona,
+    so the prefix stays byte-stable for any future prompt caching.
+    """
+
+    name: str
+    text: str
+
+
+def render_sections(sections: Iterable[PromptSection]) -> str:
+    """Concatenate non-empty sections in order, separated by blank lines."""
+    return "\n\n".join(s.text.strip() for s in sections if s.text.strip())
+
 
 FileReadTool = Literal["read", "bash", "indirect"]
 

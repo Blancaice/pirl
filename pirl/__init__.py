@@ -19,7 +19,7 @@ Public API::
 """
 
 from .frontmatter import parse_frontmatter, strip_frontmatter
-from .prompt import format_skills_for_prompt
+from .prompt import PromptSection, format_skills_for_prompt, render_sections
 from .skills import (
     Diagnostic,
     LoadSkillsResult,
@@ -63,13 +63,15 @@ from .generate import (
     parse_proposal_json,
 )
 from .tools import Tool, ToolRegistry, ToolResult, builtin_tools
-from .agent import Agent, RunResult
+from .agent import Agent, FinishCalled, RunResult, StepStart, ToolCalled
 
 __all__ = [
     # Part A
     "Diagnostic",
     "LoadSkillsResult",
+    "PromptSection",
     "Skill",
+    "render_sections",
     "discover_skills",
     "expand_skill_command",
     "format_skills_for_prompt",
@@ -112,6 +114,9 @@ __all__ = [
     # Agent runtime
     "Agent",
     "RunResult",
+    "StepStart",
+    "ToolCalled",
+    "FinishCalled",
     "Tool",
     "ToolRegistry",
     "ToolResult",

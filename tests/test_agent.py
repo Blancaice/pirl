@@ -1,6 +1,6 @@
 import json
 
-from pirl.agent import Agent, RunResult
+from pirl.agent import Agent, RunResult, StepStart, ToolCalled
 from pirl.llm import Completion, ToolCall
 from pirl.proposal import ToolCall as TraceCall
 from pirl.skills import Skill
@@ -147,6 +147,46 @@ def test_failed_skill_use_records_failure(tmp_path):
     record = store.get("foo")
     assert record.adoptions == 1
     assert record.failures == 1
+
+
+def test_reasoning_is_collected(tmp_path):
+    agent = _agent(
+        tmp_path,
+        [
+            Completion("", [ToolCall("list_files", '{"path": "."}')], reasoning="think 1"),
+            Completion("done", [], reasoning="think 2"),
+        ],
+    )
+    result = agent.run("x")
+    assert result.reasoning == ["think 1", "think 2"]
+
+
+def test_system_prompt_is_sectioned():
+    agent = Agent(_ScriptedClient([]), system_prompt="extra rule")
+    names = [s.name for s in agent._system_sections()]
+    assert names == ["persona", "rules"]
+
+
+def test_skills_become_a_section():
+    skill = Skill("pdf-tools", "Extract text from PDFs.", "/tmp/x/SKILL.md", "/tmp/x", "path")
+    agent = Agent(_ScriptedClient([]), skills=[skill])
+    names = [s.name for s in agent._system_sections()]
+    assert names == ["persona", "skills"]
+
+
+def test_on_step_callback_fires(tmp_path):
+    events = []
+    agent = _agent(
+        tmp_path,
+        [
+            Completion("", [ToolCall("list_files", '{"path": "."}')]),
+            Completion("done", []),
+        ],
+        on_step=events.append,
+    )
+    agent.run("x")
+    assert any(isinstance(e, StepStart) for e in events)
+    assert any(isinstance(e, ToolCalled) and e.name == "list_files" for e in events)
 
 
 def test_self_gen_called_at_end(tmp_path):

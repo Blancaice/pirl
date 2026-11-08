@@ -1,5 +1,14 @@
-from pirl.prompt import format_skills_for_prompt
+from pirl.prompt import PromptSection, format_skills_for_prompt, render_sections
 from pirl.skills import Skill
+
+
+def test_render_sections_joins_and_drops_empty():
+    sections = [
+        PromptSection("a", "one"),
+        PromptSection("b", "  "),  # empty -> dropped
+        PromptSection("c", "two"),
+    ]
+    assert render_sections(sections) == "one\n\ntwo"
 
 
 def make_skill(name="pdf-tools", description="Extract text from PDFs.", **kw):

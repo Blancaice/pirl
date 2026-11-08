@@ -266,6 +266,37 @@ class SkillStore:
         self._upsert(record)
         return record
 
+    def reject_candidate(self, name: str, reason: str = "") -> SkillRecord:
+        """Reject a candidate: ``candidate/<name>`` -> ``retired/<name>``."""
+        self.init()
+        src = self.candidate_dir / name
+        if not src.exists():
+            raise FileNotFoundError(f"candidate skill not found: {name}")
+
+        dest = self.retired_dir / name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.move(str(src), str(dest))
+
+        existing = self.get(name) or SkillRecord(
+            name=name, status=STATUS_CANDIDATE, created_at=now_iso()
+        )
+        record = SkillRecord(
+            name=name,
+            status=STATUS_RETIRED,
+            created_at=existing.created_at,
+            version=existing.version,
+            retrievals=existing.retrievals,
+            adoptions=existing.adoptions,
+            failures=existing.failures,
+            reviewer=existing.reviewer,
+            activate_reason=existing.activate_reason,
+            retired_at=now_iso(),
+            retire_reason=f"rejected: {reason}" if reason else "rejected",
+        )
+        self._upsert(record)
+        return record
+
     def reject(self, name: str, reason: str = "") -> SkillRecord:
         """Record a rejected draft (audit only — nothing lands in ``candidate/``)."""
         self.init()

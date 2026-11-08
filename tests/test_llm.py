@@ -100,6 +100,31 @@ def test_complete_raises_on_http_error(monkeypatch):
     assert "bad key" in exc.value.body
 
 
+def test_complete_parses_reasoning(monkeypatch):
+    payload = {
+        "choices": [
+            {"message": {"content": "answer", "reasoning_content": "hmm let me think"}}
+        ]
+    }
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *a, **kw: _FakeResponse(json.dumps(payload).encode()),
+    )
+    completion = _client().complete([{"role": "user", "content": "hi"}])
+    assert completion.text == "answer"
+    assert completion.reasoning == "hmm let me think"
+
+
+def test_complete_reasoning_defaults_to_empty(monkeypatch):
+    payload = {"choices": [{"message": {"content": "answer"}}]}
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *a, **kw: _FakeResponse(json.dumps(payload).encode()),
+    )
+    completion = _client().complete([{"role": "user", "content": "hi"}])
+    assert completion.reasoning == ""
+
+
 def test_complete_raises_on_invalid_json(monkeypatch):
     monkeypatch.setattr(
         "urllib.request.urlopen",

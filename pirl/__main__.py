@@ -67,6 +67,14 @@ def _build_parser() -> argparse.ArgumentParser:
     retire.add_argument("root", nargs="?", default=None)
     retire.add_argument("--reason", default="")
 
+    reject = sub.add_parser("reject", help="reject a candidate (candidate -> retired)")
+    reject.add_argument("name")
+    reject.add_argument("root", nargs="?", default=None)
+    reject.add_argument("--reason", default="")
+
+    review = sub.add_parser("review", help="interactively review candidate skills")
+    review.add_argument("root", nargs="?", default=None)
+
     verify_cmd = sub.add_parser("verify", help="run a proposal directory's held-out tests")
     verify_cmd.add_argument("directory")
 
@@ -168,15 +176,79 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0 if result.passed else 1
 
 
+def _cmd_reject(args: argparse.Namespace) -> int:
+    store = _store(args)
+    record = store.reject_candidate(args.name, reason=args.reason)
+    print(f"rejected {record.name} -> retired (reason={record.retire_reason or '-'})")
+    return 0
+
+
+def _candidate_prompt(store: SkillStore, name: str) -> str:
+    """Show one candidate and ask the user; returns activate/reject/skip."""
+    skill_md = store.candidate_dir / name / "SKILL.md"
+    try:
+        body = skill_md.read_text(encoding="utf-8")
+    except OSError:
+        body = "(unreadable)"
+    print(f"\n--- candidate skill「{name}」---", file=sys.stderr)
+    print(body[:2000], file=sys.stderr)
+    print(f"\n(full file: {skill_md})", file=sys.stderr)
+    if not sys.stdin.isatty():
+        return "skip"
+    while True:
+        choice = input("[a]ctivate / [r]eject / [s]kip: ").strip().lower()
+        if choice in ("a", "activate"):
+            return "activate"
+        if choice in ("r", "reject"):
+            return "reject"
+        if choice in ("s", "skip", ""):
+            return "skip"
+        print("input a / r / s", file=sys.stderr)
+
+
+def _cmd_review(args: argparse.Namespace) -> int:
+    store = _store(args)
+    candidates = store.records(status="candidate")
+    if not candidates:
+        print("no candidate skills", file=sys.stderr)
+        return 0
+    for record in candidates:
+        action = _candidate_prompt(store, record.name)
+        if action == "activate":
+            store.activate(record.name, reason="approved via review")
+            print(f"activated {record.name}", file=sys.stderr)
+        elif action == "reject":
+            store.reject_candidate(record.name, reason="rejected via review")
+            print(f"rejected {record.name}", file=sys.stderr)
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
-    from .agent import Agent
+    from .agent import Agent, FinishCalled, StepStart, ToolCalled
     from .generate import generator_from_client
     from .lifecycle import SkillStore
-    from .llm import client_from_env
+    from .llm import LLMConfigError, LLMError, client_from_env
     from .loop import SelfGenLoop
     from .tools import ToolRegistry, builtin_tools
 
-    client = client_from_env()
+    def render_step(event) -> str:
+        match event:
+            case StepStart(step, max_steps):
+                return f"[step {step}/{max_steps}] asking model..."
+            case ToolCalled(name, arguments):
+                return f"  → {name} {arguments}"
+            case FinishCalled(arguments):
+                return f"  → finish({arguments})"
+            case _:
+                return str(event)
+
+    try:
+        client = client_from_env()
+    except LLMConfigError as error:
+        print(f"pirl: {error}", file=sys.stderr)
+        print("set PIRL_BASE_URL / PIRL_API_KEY / PIRL_MODEL (see README)", file=sys.stderr)
+        return 2
+
     store = SkillStore()
     active_skills = store.load_active_skills().skills
     registry = ToolRegistry(args.cwd, builtin_tools())
@@ -188,14 +260,32 @@ def _cmd_run(args: argparse.Namespace) -> int:
         self_gen=loop,
         skill_store=store,
         max_steps=args.max_steps,
+        on_step=lambda event: print(render_step(event), file=sys.stderr, flush=True),
     )
-    result = agent.run(args.task)
-    print(result.answer or f"[{result.outcome}] {result.message}")
+    try:
+        result = agent.run(args.task)
+    except LLMError as error:
+        print(f"pirl: {error}", file=sys.stderr)
+        return 1
+
+    for step, block in enumerate(result.reasoning, 1):
+        print(f"--- thinking (step {step}) ---", file=sys.stderr)
+        print(block, file=sys.stderr)
+    print(result.answer or f"[{result.outcome}] {result.message}", flush=True)
     if result.loop_result is not None:
+        loop_result = result.loop_result
         print(
-            f"[self-gen] {result.loop_result.status}: {result.loop_result.message}",
+            f"[self-gen] {loop_result.status}: {loop_result.message}",
             file=sys.stderr,
         )
+        if loop_result.status == "candidate" and loop_result.name:
+            action = _candidate_prompt(store, loop_result.name)
+            if action == "activate":
+                store.activate(loop_result.name, reason="approved interactively")
+                print(f"activated {loop_result.name}", file=sys.stderr)
+            elif action == "reject":
+                store.reject_candidate(loop_result.name, reason="rejected interactively")
+                print(f"rejected {loop_result.name}", file=sys.stderr)
     return 0 if result.outcome == "success" else 1
 
 
@@ -210,6 +300,8 @@ def main(argv: Optional[list] = None) -> int:
         "ls": _cmd_ls,
         "activate": _cmd_activate,
         "retire": _cmd_retire,
+        "reject": _cmd_reject,
+        "review": _cmd_review,
         "verify": _cmd_verify,
         "run": _cmd_run,
     }

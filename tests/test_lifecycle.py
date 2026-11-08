@@ -14,6 +14,18 @@ from pirl.lifecycle import (
 from pirl.proposal import Proposal, CaseSpec
 
 
+def test_reject_candidate_moves_to_retired(tmp_path):
+    store = SkillStore(tmp_path / "skills")
+    (store.candidate_dir / "foo").mkdir(parents=True)
+    (store.candidate_dir / "foo" / "SKILL.md").write_text("x", encoding="utf-8")
+
+    record = store.reject_candidate("foo", reason="noise")
+    assert record.status == STATUS_RETIRED
+    assert not (store.candidate_dir / "foo").exists()
+    assert (store.retired_dir / "foo").exists()
+    assert record.retire_reason == "rejected: noise"
+
+
 def make_proposal(name="upper", description="Uppercase input."):
     return Proposal(
         name=name,
