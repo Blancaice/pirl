@@ -112,7 +112,12 @@ def test_retrieve_and_adopt_flow(store):
     assert record.failures == 0
 
 
-def test_unknown_skill_bookkeeping_is_noop(store):
+def test_bookkeeping_self_heals_missing_record(store):
     loop = SelfGenLoop(store)
-    assert loop.on_retrieve("nope") is None
-    assert loop.on_adopt("nope", True) is None
+    record = loop.on_retrieve("nope")
+    assert record is not None
+    assert record.status == "active"
+    assert record.retrievals == 1
+    adopted = loop.on_adopt("nope", True)
+    assert adopted.adoptions == 1
+    assert adopted.failures == 0

@@ -186,6 +186,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         skills=active_skills,
         tools=registry,
         self_gen=loop,
+        skill_store=store,
         max_steps=args.max_steps,
     )
     result = agent.run(args.task)

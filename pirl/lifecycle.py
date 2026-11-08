@@ -279,24 +279,28 @@ class SkillStore:
     # Utility statistics (B6)
     # ------------------------------------------------------------------ #
 
-    def on_retrieve(self, name: str) -> Optional[SkillRecord]:
-        """Increment the retrieval counter when a skill enters a prompt."""
+    def on_retrieve(self, name: str) -> SkillRecord:
+        """Increment the retrieval counter when a skill enters a prompt.
+
+        Self-healing: an active-dir skill loaded from disk may not be registered
+        yet, so a missing record is created as ``active`` rather than dropped.
+        """
         record = self.get(name)
         if record is None:
-            return None
+            record = SkillRecord(name=name, status=STATUS_ACTIVE, created_at=now_iso())
         record.retrievals += 1
         self._upsert(record)
         return record
 
-    def on_adopt(self, name: str, success: bool) -> Optional[SkillRecord]:
-        """Record one adoption.
+    def on_adopt(self, name: str, success: bool) -> SkillRecord:
+        """Record one adoption (self-healing, like :meth:`on_retrieve`).
 
         ``adoptions`` always increments (total adoptions); ``failures`` only
         increments when ``success`` is False.
         """
         record = self.get(name)
         if record is None:
-            return None
+            record = SkillRecord(name=name, status=STATUS_ACTIVE, created_at=now_iso())
         record.adoptions += 1
         if not success:
             record.failures += 1

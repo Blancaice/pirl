@@ -144,10 +144,10 @@ class SelfGenLoop:
     def retire(self, name: str, reason: str = "") -> SkillRecord:
         return self.store.retire(name, reason=reason)
 
-    def on_retrieve(self, name: str) -> Optional[SkillRecord]:
+    def on_retrieve(self, name: str) -> SkillRecord:
         return self.store.on_retrieve(name)
 
-    def on_adopt(self, name: str, success: bool) -> Optional[SkillRecord]:
+    def on_adopt(self, name: str, success: bool) -> SkillRecord:
         return self.store.on_adopt(name, success)
 
     def periodic_retire(self, **kwargs):

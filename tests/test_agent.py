@@ -1,3 +1,5 @@
+import json
+
 from pirl.agent import Agent, RunResult
 from pirl.llm import Completion, ToolCall
 from pirl.proposal import ToolCall as TraceCall
@@ -67,6 +69,84 @@ def test_system_message_includes_skills():
     system = agent._system_message()
     assert "pdf-tools" in system
     assert "Extract text from PDFs." in system
+
+
+def test_finish_success(tmp_path):
+    agent = _agent(
+        tmp_path,
+        [Completion("", [ToolCall("finish", json.dumps({"success": True, "summary": "done"}), "c1")])],
+    )
+    result = agent.run("x")
+    assert result.outcome == "success"
+    assert result.answer == "done"
+
+
+def test_finish_failure(tmp_path):
+    agent = _agent(
+        tmp_path,
+        [Completion("", [ToolCall("finish", json.dumps({"success": False, "summary": "cannot"}), "c1")])],
+    )
+    result = agent.run("x")
+    assert result.outcome == "failure"
+    assert result.answer == "cannot"
+
+
+def test_finish_not_in_trace(tmp_path):
+    agent = _agent(
+        tmp_path,
+        [Completion("", [ToolCall("finish", json.dumps({"success": True, "summary": "d"}), "c1")])],
+    )
+    result = agent.run("x")
+    assert result.trace == []
+
+
+def test_finish_tool_is_advertised(tmp_path):
+    agent = _agent(tmp_path, [Completion("ok", [])])
+    assert "finish" in [s.name for s in agent._tool_specs()]
+
+
+def _activate_skill(store, name="foo"):
+    (store.candidate_dir / name).mkdir(parents=True)
+    (store.candidate_dir / name / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: d\n---\n# b", encoding="utf-8"
+    )
+    store.activate(name, reviewer="t", reason="test")
+    return str(store.active_dir / name / "SKILL.md")
+
+
+def test_skill_usage_is_tracked(tmp_path):
+    from pirl.lifecycle import SkillStore
+
+    store = SkillStore(tmp_path / "skills")
+    skill_path = _activate_skill(store)
+    client = _ScriptedClient([
+        Completion("", [ToolCall("read_file", json.dumps({"path": skill_path}), "c1")]),
+        Completion("", [ToolCall("finish", json.dumps({"success": True, "summary": "ok"}), "c2")]),
+    ])
+    agent = Agent(client, tools=ToolRegistry(tmp_path, builtin_tools()), skill_store=store)
+    result = agent.run("use foo")
+    assert result.outcome == "success"
+    record = store.get("foo")
+    assert record is not None
+    assert record.retrievals == 1
+    assert record.adoptions == 1
+    assert record.failures == 0
+
+
+def test_failed_skill_use_records_failure(tmp_path):
+    from pirl.lifecycle import SkillStore
+
+    store = SkillStore(tmp_path / "skills")
+    skill_path = _activate_skill(store)
+    client = _ScriptedClient([
+        Completion("", [ToolCall("read_file", json.dumps({"path": skill_path}), "c1")]),
+        Completion("", [ToolCall("finish", json.dumps({"success": False, "summary": "nope"}), "c2")]),
+    ])
+    agent = Agent(client, tools=ToolRegistry(tmp_path, builtin_tools()), skill_store=store)
+    agent.run("use foo")
+    record = store.get("foo")
+    assert record.adoptions == 1
+    assert record.failures == 1
 
 
 def test_self_gen_called_at_end(tmp_path):

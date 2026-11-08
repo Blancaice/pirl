@@ -24,7 +24,7 @@ pirl/
 ├── tools.py         # 工作区受限的工具集(list/read/write/search/bash)+ ToolRegistry
 ├── agent.py         # 最小 turn loop:系统提示含 skills + 工具执行 + trace + 末尾自生成
 └── __main__.py      # CLI(scan / prompt / expand / init / ls / activate / retire / verify / run)
-tests/               # pytest 测试(127 个用例)
+tests/               # pytest 测试(133 个用例)
 ```
 
 ## A 部分实现要点(照抄 pi)
@@ -136,6 +136,9 @@ print(res.status, res.name, res.message)
 
 `tools.py` 提供工作区受限的五个工具(路径逃逸会被拒绝,输出截断),`agent.py`
 把 Part A(skills 进系统提示)和 Part B(末尾自生成)接在一个 turn loop 上。
+循环结束条件:模型给出纯文本答复(视为 success),或调用 `finish` 工具
+(`success` true/false)。skill 效用统计已自动接线:模型 `read_file` 命中 active
+skill 路径 → `on_retrieve`,运行结束按 outcome → `on_adopt`。
 
 ```bash
 export PIRL_BASE_URL=https://api.deepseek.com/v1
@@ -152,7 +155,7 @@ client = ChatClient(base_url=..., api_key=..., model=...)
 store = SkillStore()
 registry = ToolRegistry(".", builtin_tools())
 loop = SelfGenLoop(store, generator=generator_from_client(client))
-agent = Agent(client, skills=store.load_active_skills().skills, tools=registry, self_gen=loop)
+agent = Agent(client, skills=store.load_active_skills().skills, tools=registry, self_gen=loop, skill_store=store)
 result = agent.run("summarize this repo")
 # result.answer / result.outcome / result.trace / result.loop_result
 ```
@@ -175,11 +178,9 @@ result = agent.run("summarize this repo")
 
 ## 集成约定(接入 agent loop 时)
 
-效用统计是**手动**接线,包内不自动调用。必须在两个点调用,否则
-`periodic_retire` 会把活跃 skill 误退役(`retrievals == 0` 恒成立):
-
-- **召回点**:skill 进入 prompt 时调 `store.on_retrieve(name)`。
-- **采用点**:任务结束、skill 被实际采用后调 `store.on_adopt(name, success)`。
+`Agent` 已经自动接线:模型 `read_file` 命中 active skill 路径时调
+`store.on_retrieve(name)`,运行结束按 outcome 调 `store.on_adopt(name, success)`。
+只有在你**自己写 loop、不用 `Agent`** 时才需要手动在这两个点调用。
 
 字段口径:`adoptions` = 总采用次数,`failures` = 其中失败的子集,
 `success_rate = (adoptions - failures) / adoptions`。
