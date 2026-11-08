@@ -46,6 +46,24 @@ from .proposal import (
     verify,
 )
 from .loop import LoopResult, SelfGenLoop
+from .llm import (
+    ChatClient,
+    Completion,
+    LLMConfigError,
+    LLMError,
+    LLMHTTPError,
+    LLMResponseError,
+    ToolCall,
+    ToolSpec,
+    client_from_env,
+)
+from .generate import (
+    build_generation_messages,
+    generator_from_client,
+    parse_proposal_json,
+)
+from .tools import Tool, ToolRegistry, ToolResult, builtin_tools
+from .agent import Agent, RunResult
 
 __all__ = [
     # Part A
@@ -77,6 +95,27 @@ __all__ = [
     # Part B — closed loop
     "LoopResult",
     "SelfGenLoop",
+    # LLM client
+    "ChatClient",
+    "Completion",
+    "LLMConfigError",
+    "LLMError",
+    "LLMHTTPError",
+    "LLMResponseError",
+    "ToolCall",
+    "ToolSpec",
+    "client_from_env",
+    # Skill generation
+    "build_generation_messages",
+    "generator_from_client",
+    "parse_proposal_json",
+    # Agent runtime
+    "Agent",
+    "RunResult",
+    "Tool",
+    "ToolRegistry",
+    "ToolResult",
+    "builtin_tools",
 ]
 
 __version__ = "0.2.0"

@@ -82,7 +82,12 @@ class SelfGenLoop:
                 return LoopResult(
                     True, "error", message="trigger fired but no proposal/generator given"
                 )
-            proposal = gen(trace, outcome)
+            try:
+                proposal = gen(trace, outcome)
+            except Exception as exc:  # noqa: BLE001 - model output is untrusted
+                return LoopResult(
+                    True, "error", message=f"generator raised: {exc}"
+                )
 
         if not isinstance(proposal, Proposal):
             return LoopResult(

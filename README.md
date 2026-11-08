@@ -19,8 +19,12 @@ pirl/
 ├── lifecycle.py     # B1/B2: 生命周期状态机 + 侧车注册表(skill-registry.json)
 ├── proposal.py      # B3/B4/B5: 触发源 + 提案结构 + 验证门(留出样例)
 ├── loop.py          # B6: 自生成闭环 + 效用统计 + 定期退役
-└── __main__.py      # CLI(scan / prompt / expand / init / ls / activate / retire / verify)
-tests/               # pytest 测试(97 个用例)
+├── llm.py           # 零依赖 OpenAI 兼容 chat client(urllib)
+├── generate.py      # 真实 generate_skill:模型输出 → Proposal(JSON 契约 + 解析 + 校验)
+├── tools.py         # 工作区受限的工具集(list/read/write/search/bash)+ ToolRegistry
+├── agent.py         # 最小 turn loop:系统提示含 skills + 工具执行 + trace + 末尾自生成
+└── __main__.py      # CLI(scan / prompt / expand / init / ls / activate / retire / verify / run)
+tests/               # pytest 测试(127 个用例)
 ```
 
 ## A 部分实现要点(照抄 pi)
@@ -107,6 +111,50 @@ def generate_skill(trace, outcome) -> Proposal:   # 模型调用(你来实现)
 loop = SelfGenLoop(store, generator=generate_skill)
 res = loop.on_run_end(trace=[], outcome="failure")
 print(res.status)   # "candidate" | "rejected" | "skipped" | "error"
+```
+
+## 真实模型接入(D 之后)
+
+把自生成闭环接上真实模型调用:`llm.py` 提供零依赖的 OpenAI 兼容
+`/chat/completions` 客户端(`urllib`,不加 HTTP 依赖),`generate.py` 把
+`loop.py` 里留作 stub 的 `generate_skill` 补上——让模型把 run trace 变成
+带留出测试的 `Proposal`。
+
+```python
+from pirl import ChatClient, client_from_env, SelfGenLoop, SkillStore, generator_from_client
+
+client = client_from_env()                  # PIRL_BASE_URL / PIRL_API_KEY / PIRL_MODEL
+store = SkillStore("~/.pirl/skills")
+loop = SelfGenLoop(store, generator=generator_from_client(client))
+
+res = loop.on_run_end(trace=[...], outcome="failure")
+# 触发 → 模型提案(带 tests)→ 留出样例验证 → candidate / rejected
+print(res.status, res.name, res.message)
+```
+
+## Agent 运行时(D 之后第 2 片)
+
+`tools.py` 提供工作区受限的五个工具(路径逃逸会被拒绝,输出截断),`agent.py`
+把 Part A(skills 进系统提示)和 Part B(末尾自生成)接在一个 turn loop 上。
+
+```bash
+export PIRL_BASE_URL=https://api.deepseek.com/v1
+export PIRL_API_KEY=...
+export PIRL_MODEL=deepseek-chat
+
+python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo
+```
+
+```python
+from pirl import Agent, ChatClient, SelfGenLoop, SkillStore, ToolRegistry, builtin_tools, generator_from_client
+
+client = ChatClient(base_url=..., api_key=..., model=...)
+store = SkillStore()
+registry = ToolRegistry(".", builtin_tools())
+loop = SelfGenLoop(store, generator=generator_from_client(client))
+agent = Agent(client, skills=store.load_active_skills().skills, tools=registry, self_gen=loop)
+result = agent.run("summarize this repo")
+# result.answer / result.outcome / result.trace / result.loop_result
 ```
 
 ## 与 pi 的差异(有意为之)

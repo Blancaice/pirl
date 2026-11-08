@@ -11,6 +11,8 @@ Usage::
     python -m pirl activate NAME [ROOT] --reason "..." [--reviewer "..."]
     python -m pirl retire NAME [ROOT] --reason "..."
     python -m pirl verify DIR
+
+    python -m pirl run "TASK" [--cwd DIR] [--max-steps N]
 """
 
 from __future__ import annotations
@@ -67,6 +69,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     verify_cmd = sub.add_parser("verify", help="run a proposal directory's held-out tests")
     verify_cmd.add_argument("directory")
+
+    run = sub.add_parser("run", help="run one task in a workspace")
+    run.add_argument("task")
+    run.add_argument("--cwd", default=".")
+    run.add_argument("--max-steps", type=int, default=20)
 
     return parser
 
@@ -161,6 +168,36 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return 0 if result.passed else 1
 
 
+def _cmd_run(args: argparse.Namespace) -> int:
+    from .agent import Agent
+    from .generate import generator_from_client
+    from .lifecycle import SkillStore
+    from .llm import client_from_env
+    from .loop import SelfGenLoop
+    from .tools import ToolRegistry, builtin_tools
+
+    client = client_from_env()
+    store = SkillStore()
+    active_skills = store.load_active_skills().skills
+    registry = ToolRegistry(args.cwd, builtin_tools())
+    loop = SelfGenLoop(store, generator=generator_from_client(client))
+    agent = Agent(
+        client,
+        skills=active_skills,
+        tools=registry,
+        self_gen=loop,
+        max_steps=args.max_steps,
+    )
+    result = agent.run(args.task)
+    print(result.answer or f"[{result.outcome}] {result.message}")
+    if result.loop_result is not None:
+        print(
+            f"[self-gen] {result.loop_result.status}: {result.loop_result.message}",
+            file=sys.stderr,
+        )
+    return 0 if result.outcome == "success" else 1
+
+
 def main(argv: Optional[list] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -173,6 +210,7 @@ def main(argv: Optional[list] = None) -> int:
         "activate": _cmd_activate,
         "retire": _cmd_retire,
         "verify": _cmd_verify,
+        "run": _cmd_run,
     }
     handler = handlers.get(args.command)
     if handler is None:
