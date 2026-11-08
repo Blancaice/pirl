@@ -1,0 +1,10 @@
+[project]
+name = "pirl"
+version = "0.1.0"
+description = "Python port of the skill system (Part A) — skills as first-class citizens"
+requires-python = ">=3.10"
+dependencies = ["PyYAML>=6.0"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
