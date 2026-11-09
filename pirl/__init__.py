@@ -64,8 +64,11 @@ from .generate import (
 )
 from .tools import Tool, ToolRegistry, ToolResult, builtin_tools
 from .agent import Agent, FinishCalled, RunResult, StepStart, ToolCalled
+from . import ui
 
 __all__ = [
+    # UI
+    "ui",
     # Part A
     "Diagnostic",
     "LoadSkillsResult",

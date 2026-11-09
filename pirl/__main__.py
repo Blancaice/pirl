@@ -21,6 +21,7 @@ import argparse
 import sys
 from typing import List, Optional
 
+from . import ui
 from .commands import expand_skill_command
 from .lifecycle import SkillStore
 from .prompt import format_skills_for_prompt
@@ -193,17 +194,11 @@ def _candidate_prompt(store: SkillStore, name: str) -> str:
     print(f"\n--- candidate skill「{name}」---", file=sys.stderr)
     print(body[:2000], file=sys.stderr)
     print(f"\n(full file: {skill_md})", file=sys.stderr)
-    if not sys.stdin.isatty():
-        return "skip"
-    while True:
-        choice = input("[a]ctivate / [r]eject / [s]kip: ").strip().lower()
-        if choice in ("a", "activate"):
-            return "activate"
-        if choice in ("r", "reject"):
-            return "reject"
-        if choice in ("s", "skip", ""):
-            return "skip"
-        print("input a / r / s", file=sys.stderr)
+    return ui.select(
+        f"Review candidate「{name}」:",
+        {"a": "activate", "r": "reject", "s": "skip"},
+        default="s",
+    )
 
 
 def _cmd_review(args: argparse.Namespace) -> int:
