@@ -194,6 +194,46 @@ def test_usage_accumulates_across_steps(tmp_path):
     assert result.usage.total_tokens == 40
 
 
+def test_verify_accepts_finish_when_passing(tmp_path):
+    agent = _agent(
+        tmp_path,
+        [Completion("", [ToolCall("finish", json.dumps({"success": True, "summary": "done"}), "c1")])],
+        verify_command="true",
+    )
+    result = agent.run("x")
+    assert result.outcome == "success"
+    assert result.answer == "done"
+
+
+def test_verify_rejects_finish_when_failing(tmp_path):
+    agent = _agent(
+        tmp_path,
+        [Completion("", [ToolCall("finish", json.dumps({"success": True, "summary": "done"}), "c1")])] * 10,
+        verify_command="false",
+        max_steps=3,
+    )
+    result = agent.run("x")
+    assert result.outcome == "failure"  # never accepted; verify always fails
+    assert result.message == "max steps exceeded"
+
+
+def test_verify_failure_feedback_reaches_model(tmp_path):
+    client = _ScriptedClient([
+        Completion("", [ToolCall("finish", json.dumps({"success": True, "summary": "done"}), "c1")]),
+        Completion("", [ToolCall("finish", json.dumps({"success": True, "summary": "done"}), "c2")]),
+    ])
+    agent = Agent(
+        client,
+        tools=ToolRegistry(tmp_path, builtin_tools()),
+        verify_command="false",
+        max_steps=2,
+    )
+    agent.run("x")
+    second_messages = client.calls[1][0]
+    tool_contents = [m.get("content", "") for m in second_messages if m.get("role") == "tool"]
+    assert any("verification failed" in c for c in tool_contents)
+
+
 def test_on_step_callback_fires(tmp_path):
     events = []
     agent = _agent(

@@ -67,6 +67,7 @@ from .tools import Tool, ToolRegistry, ToolResult, builtin_tools
 from .agent import Agent, FinishCalled, RunResult, StepStart, ToolCalled
 from .run_memory import memory_path, read_memory, write_memory
 from .run_history import RunRecord, RunStore
+from .git_snapshot import GitSnapshot, is_git, restore, snapshot
 from .env import load_dotenv
 from . import ui
 
@@ -135,6 +136,10 @@ __all__ = [
     "write_memory",
     "RunRecord",
     "RunStore",
+    "GitSnapshot",
+    "is_git",
+    "snapshot",
+    "restore",
     "load_dotenv",
 ]
 

@@ -37,6 +37,7 @@ class RunRecord:
     started_at: str
     trace: List[Dict[str, str]] = field(default_factory=list)
     usage: Dict[str, int] = field(default_factory=dict)
+    git: Optional[Dict[str, Any]] = None  # pre-run git snapshot (branch/head/dirty)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "RunRecord":
@@ -54,6 +55,7 @@ class RunRecord:
             usage={
                 str(k): int(v) for k, v in (d.get("usage") or {}).items()
             },
+            git=d.get("git") if isinstance(d.get("git"), dict) else None,
         )
 
     def to_dict(self) -> Dict[str, Any]:

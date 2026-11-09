@@ -11,6 +11,7 @@ retirement actually work.
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
@@ -119,6 +120,7 @@ class Agent:
         system_prompt: str = "",
         memory: str = "",
         max_steps: int = MAX_STEPS,
+        verify_command: str | None = None,
         on_step: Callable[[StepEvent], None] | None = None,
     ) -> None:
         self.client = client
@@ -129,6 +131,7 @@ class Agent:
         self.system_prompt = system_prompt
         self.memory = memory
         self.max_steps = max_steps
+        self.verify_command = verify_command
         self.on_step = on_step
         self._retrieved: Set[str] = set()
         self._reasoning_log: List[str] = []
@@ -137,6 +140,29 @@ class Agent:
     def _emit(self, event: StepEvent) -> None:
         if self.on_step is not None:
             self.on_step(event)
+
+    def _verify(self, command: str) -> tuple[bool, str]:
+        """Run the deterministic verification command; (passed, output)."""
+        workspace = self.tools.workspace if self.tools is not None else "."
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=workspace,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "timed out after 120s"
+        except OSError as exc:
+            return False, str(exc)
+        if proc.returncode == 0:
+            return True, ""
+        out = proc.stdout
+        if proc.stderr:
+            out = (out + "\n" if out else "") + proc.stderr
+        return False, (out[:2000] or f"exit {proc.returncode}")
 
     def _system_sections(self) -> List[PromptSection]:
         """Build the stable, ordered system-prompt prefix.
@@ -228,6 +254,18 @@ class Agent:
                         )
                     success = bool(args.get("success", True))
                     summary = str(args.get("summary", ""))
+                    if success and self.verify_command:
+                        self._emit(ToolCalled("verify", self.verify_command))
+                        passed, output = self._verify(self.verify_command)
+                        if not passed:
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": call_id,
+                                    "content": f"verification failed:\n{output}",
+                                }
+                            )
+                            continue  # reject the completion; let the model fix it
                     return self._close(
                         trace, "success" if success else "failure", summary
                     )

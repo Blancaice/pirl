@@ -86,8 +86,14 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--verify",
         default=None,
-        help="command run after the task to deterministically check the outcome",
+        help="command to deterministically verify a finish(success=true)",
     )
+
+    restore_cmd = sub.add_parser(
+        "restore", help="rollback workspace to a run's pre-run git snapshot"
+    )
+    restore_cmd.add_argument("run_id")
+    restore_cmd.add_argument("--cwd", default=".")
 
     return parser
 
@@ -223,33 +229,24 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_verify(command: str, cwd: str) -> bool:
-    """Run a deterministic verification command; True on exit code 0."""
-    import subprocess
+def _cmd_restore(args: argparse.Namespace) -> int:
+    from .git_snapshot import GitSnapshot, restore
+    from .run_history import RunStore
 
-    print(f"[verify] {command}", file=sys.stderr)
-    try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except subprocess.TimeoutExpired:
-        print("[verify] timed out", file=sys.stderr)
-        return False
-
-    if proc.returncode == 0:
-        print("[verify] PASS", file=sys.stderr)
-        return True
-    print(f"[verify] FAIL (exit {proc.returncode})", file=sys.stderr)
-    for label, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
-        if stream.strip():
-            print(f"--- {label} ---", file=sys.stderr)
-            print(stream[:2000], file=sys.stderr)
-    return False
+    record = RunStore(args.cwd).read_run(args.run_id)
+    if record is None or record.git is None:
+        print(f"no git snapshot for run {args.run_id}", file=sys.stderr)
+        return 1
+    snap = GitSnapshot.from_dict(record.git)
+    if not ui.confirm(
+        f"restore workspace to {snap.head[:8]}? This discards uncommitted changes.",
+        default=False,
+    ):
+        print("cancelled", file=sys.stderr)
+        return 1
+    restore(args.cwd, snap)
+    print(f"restored to {snap.head[:8]}", file=sys.stderr)
+    return 0
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -258,6 +255,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from .agent import Agent, FinishCalled, StepStart, ToolCalled
     from .env import load_dotenv
     from .generate import generator_from_client
+    from .git_snapshot import snapshot
     from .lifecycle import SkillStore
     from .llm import LLMConfigError, LLMError, client_from_env
     from .loop import SelfGenLoop
@@ -304,8 +302,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         skill_store=store,
         memory=read_memory(args.cwd),
         max_steps=args.max_steps,
+        verify_command=args.verify,
         on_step=lambda event: print(render_step(event), file=sys.stderr, flush=True),
     )
+    snap = snapshot(args.cwd)
     started_at = now_iso()
     try:
         result = agent.run(args.task)
@@ -313,16 +313,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"pirl: {error}", file=sys.stderr)
         return 1
 
-    # Deterministic outcome check (post-hoc): trust the command's exit code.
-    verify_ok = _run_verify(args.verify, args.cwd) if args.verify else True
-    effective = "success" if (result.outcome == "success" and verify_ok) else "failure"
-
-    write_memory(args.cwd, effective, result.answer or result.message)
+    write_memory(args.cwd, result.outcome, result.answer or result.message)
     RunStore(args.cwd).write_run(
         RunRecord(
             run_id=new_run_id(),
             task=args.task,
-            outcome=effective,
+            outcome=result.outcome,
             answer=result.answer or result.message,
             started_at=started_at,
             trace=[{"tool": tc.name, "args": tc.args} for tc in result.trace],
@@ -331,6 +327,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "completion_tokens": result.usage.completion_tokens,
                 "total_tokens": result.usage.total_tokens,
             },
+            git=snap.to_dict() if snap else None,
         )
     )
 
@@ -358,7 +355,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 store.reject_candidate(loop_result.name, reason="rejected interactively")
                 print(f"rejected {loop_result.name}", file=sys.stderr)
 
-    return 0 if effective == "success" else 1
+    return 0 if result.outcome == "success" else 1
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -374,6 +371,7 @@ def main(argv: Optional[list] = None) -> int:
         "retire": _cmd_retire,
         "reject": _cmd_reject,
         "review": _cmd_review,
+        "restore": _cmd_restore,
         "verify": _cmd_verify,
         "run": _cmd_run,
     }
