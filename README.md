@@ -22,10 +22,29 @@ pirl/
 ├── llm.py           # 零依赖 OpenAI 兼容 chat client(urllib)
 ├── generate.py      # 真实 generate_skill:模型输出 → Proposal(JSON 契约 + 解析 + 校验)
 ├── tools.py         # 工作区受限的工具集(list/read/write/search/bash)+ ToolRegistry
-├── agent.py         # 最小 turn loop:系统提示含 skills + 工具执行 + trace + 末尾自生成
-└── __main__.py      # CLI(scan / prompt / expand / init / ls / activate / retire / verify / run)
-tests/               # pytest 测试(133 个用例)
+├── agent.py         # turn loop:section 化系统提示 + 工具执行 + trace + 结构化进度事件 + 自生成
+├── run_memory.py    # 跨 run 记忆(追加 section,不碰 persona)
+├── env.py           # 最小 .env 加载(不覆盖已 export 的变量,值按字面量)
+├── ui.py            # ui.confirm / ui.select(TTY 感知,非交互回退)
+└── __main__.py      # CLI(scan / prompt / expand / init / ls / activate / retire / reject / review / verify / run)
+tests/               # pytest 测试(155 个用例)
 ```
+
+## 运行时增强
+
+- **系统提示 = 有序 section**:`persona` / `rules` / `memory` / `skills`,新内容**追加**、
+  从不改写 persona(字节级稳定,对 KV cache 友好)。
+- **结构化进度事件**:`StepStart` / `ToolCalled` / `FinishCalled`,loop 只发事件,
+  CLI 用 `match` 渲染——渲染层与循环解耦。
+- **思考显示**:`reasoning_content` / `reasoning` 收集到 `RunResult.reasoning`,
+  `run` 打到 stderr(需推理模型,如 DeepSeek `deepseek-reasoner`)。
+- **跨 run 记忆**:`<cwd>/.pirl/last-run.md` 记录上一次 outcome+答复,下次作为
+  `memory` section 注入,治"重复劳动"。
+- **`.env` 加载**:`run` 启动时 `load_dotenv()`,已 export 的变量优先、值不展开。
+- **项目级 skill**:`run` 除 `~/.pirl/skills/active` 外也扫 `<cwd>/.pirl/skills`(按名去重)。
+- **LLM 重试**:429/5xx/超时指数退避 + 抖动,尊重 `Retry-After`。
+- **确定性验证**:`run --verify "python -m pytest"` 在任务后用退出码判定成败。
+- **交互审核**:`run` 生成候选后询问 `[a]ctivate/[r]eject/[s]kip`;另有 `review` / `reject` 命令。
 
 ## A 部分实现要点(照抄 pi)
 

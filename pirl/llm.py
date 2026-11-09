@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import os
+import random
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -102,8 +104,13 @@ class ChatClient:
         messages: Sequence[Dict[str, Any]],
         *,
         tools: Sequence[ToolSpec] = (),
+        max_retries: int = 3,
     ) -> Completion:
-        """Send a chat-completions request and return the assistant message."""
+        """Send a chat-completions request and return the assistant message.
+
+        Retries transient failures (429, 5xx, connection/timeout) with
+        exponential backoff + jitter, honouring ``Retry-After`` when present.
+        """
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": list(messages),
@@ -113,26 +120,34 @@ class ChatClient:
             payload["tools"] = [_tool_spec_to_payload(t) for t in tools]
 
         body = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            self.base_url + "/chat/completions",
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-        )
 
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                raw = response.read().decode("utf-8")
-        except urllib.error.HTTPError as error:
-            detail = error.read().decode("utf-8", "replace")
-            raise LLMHTTPError(error.code, detail) from error
-        except urllib.error.URLError as error:
-            raise LLMError(f"cannot reach provider: {error.reason}") from error
+        for attempt in range(max_retries + 1):
+            request = urllib.request.Request(
+                self.base_url + "/chat/completions",
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    raw = response.read().decode("utf-8")
+                return _parse_completion(raw)
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode("utf-8", "replace")
+                if _retryable_status(error.code) and attempt < max_retries:
+                    time.sleep(_retry_delay(error, attempt))
+                    continue
+                raise LLMHTTPError(error.code, detail) from error
+            except urllib.error.URLError as error:
+                if attempt < max_retries:
+                    time.sleep(_backoff(attempt))
+                    continue
+                raise LLMError(f"cannot reach provider: {error.reason}") from error
 
-        return _parse_completion(raw)
+        raise LLMError("retries exhausted")  # pragma: no cover - unreachable
 
     def __repr__(self) -> str:
         return f"ChatClient(base_url={self.base_url!r}, model={self.model!r})"
@@ -173,6 +188,27 @@ def _parse_completion(raw: str) -> Completion:
         reasoning = str(reasoning)
 
     return Completion(text=text, tool_calls=tool_calls, reasoning=reasoning)
+
+
+def _retryable_status(status: int) -> bool:
+    return status in (429, 500, 502, 503, 504)
+
+
+def _backoff(attempt: int) -> float:
+    """Exponential backoff with jitter: 1s, 2s, 4s, ... (±20%)."""
+    base = 2 ** attempt
+    return base * (0.8 + 0.4 * random.random())
+
+
+def _retry_delay(error: urllib.error.HTTPError, attempt: int) -> float:
+    """Delay for a retryable HTTP error, honouring ``Retry-After``."""
+    header = error.headers.get("Retry-After", "") if error.headers else ""
+    if header:
+        try:
+            return float(header)
+        except ValueError:
+            pass
+    return _backoff(attempt)
 
 
 def client_from_env(env: Optional[Dict[str, str]] = None) -> ChatClient:

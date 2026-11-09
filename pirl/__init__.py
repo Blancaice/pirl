@@ -64,6 +64,8 @@ from .generate import (
 )
 from .tools import Tool, ToolRegistry, ToolResult, builtin_tools
 from .agent import Agent, FinishCalled, RunResult, StepStart, ToolCalled
+from .run_memory import memory_path, read_memory, write_memory
+from .env import load_dotenv
 from . import ui
 
 __all__ = [
@@ -124,6 +126,11 @@ __all__ = [
     "ToolRegistry",
     "ToolResult",
     "builtin_tools",
+    # Run memory + env
+    "memory_path",
+    "read_memory",
+    "write_memory",
+    "load_dotenv",
 ]
 
 __version__ = "0.2.0"

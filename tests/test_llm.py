@@ -143,6 +143,35 @@ def test_complete_raises_on_missing_choices(monkeypatch):
         _client().complete([{"role": "user", "content": "hi"}])
 
 
+def test_complete_retries_then_succeeds(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_urlopen(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise urllib.error.HTTPError("u", 429, "too many", {}, io.BytesIO(b"{}"))
+        return _FakeResponse(
+            json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    completion = _client().complete([{"role": "user", "content": "hi"}])
+    assert completion.text == "ok"
+    assert calls["n"] == 2
+
+
+def test_complete_gives_up_after_retries(monkeypatch):
+    def fake_urlopen(*a, **kw):
+        raise urllib.error.HTTPError("u", 500, "boom", {}, io.BytesIO(b"{}"))
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    with pytest.raises(LLMHTTPError) as exc:
+        _client().complete([{"role": "user", "content": "hi"}])
+    assert exc.value.status == 500
+
+
 def test_client_from_env_requires_all_vars():
     with pytest.raises(LLMConfigError) as exc:
         client_from_env({})

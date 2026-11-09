@@ -174,6 +174,12 @@ def test_skills_become_a_section():
     assert names == ["persona", "skills"]
 
 
+def test_memory_becomes_a_section():
+    agent = Agent(_ScriptedClient([]), memory="outcome: success\n\nfixed calc.py")
+    names = [s.name for s in agent._system_sections()]
+    assert names == ["persona", "memory"]
+
+
 def test_on_step_callback_fires(tmp_path):
     events = []
     agent = _agent(

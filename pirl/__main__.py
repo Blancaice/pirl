@@ -83,6 +83,11 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("task")
     run.add_argument("--cwd", default=".")
     run.add_argument("--max-steps", type=int, default=20)
+    run.add_argument(
+        "--verify",
+        default=None,
+        help="command run after the task to deterministically check the outcome",
+    )
 
     return parser
 
@@ -218,12 +223,46 @@ def _cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_verify(command: str, cwd: str) -> bool:
+    """Run a deterministic verification command; True on exit code 0."""
+    import subprocess
+
+    print(f"[verify] {command}", file=sys.stderr)
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        print("[verify] timed out", file=sys.stderr)
+        return False
+
+    if proc.returncode == 0:
+        print("[verify] PASS", file=sys.stderr)
+        return True
+    print(f"[verify] FAIL (exit {proc.returncode})", file=sys.stderr)
+    for label, stream in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+        if stream.strip():
+            print(f"--- {label} ---", file=sys.stderr)
+            print(stream[:2000], file=sys.stderr)
+    return False
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
     from .agent import Agent, FinishCalled, StepStart, ToolCalled
+    from .env import load_dotenv
     from .generate import generator_from_client
     from .lifecycle import SkillStore
     from .llm import LLMConfigError, LLMError, client_from_env
     from .loop import SelfGenLoop
+    from .run_memory import read_memory, write_memory
+    from .skills import discover_skills
     from .tools import ToolRegistry, builtin_tools
 
     def render_step(event) -> str:
@@ -237,6 +276,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             case _:
                 return str(event)
 
+    load_dotenv()
     try:
         client = client_from_env()
     except LLMConfigError as error:
@@ -245,15 +285,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 2
 
     store = SkillStore()
-    active_skills = store.load_active_skills().skills
+    skills = list(store.load_active_skills().skills)
+    # project-local skills: any SKILL.md under <cwd>/.pirl/skills (deduped by name)
+    active_names = {s.name for s in skills}
+    for skill in discover_skills(Path(args.cwd) / ".pirl" / "skills", "project").skills:
+        if skill.name not in active_names:
+            skills.append(skill)
+            active_names.add(skill.name)
+
     registry = ToolRegistry(args.cwd, builtin_tools())
     loop = SelfGenLoop(store, generator=generator_from_client(client))
     agent = Agent(
         client,
-        skills=active_skills,
+        skills=skills,
         tools=registry,
         self_gen=loop,
         skill_store=store,
+        memory=read_memory(args.cwd),
         max_steps=args.max_steps,
         on_step=lambda event: print(render_step(event), file=sys.stderr, flush=True),
     )
@@ -262,6 +310,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     except LLMError as error:
         print(f"pirl: {error}", file=sys.stderr)
         return 1
+
+    # Deterministic outcome check (post-hoc): trust the command's exit code.
+    verify_ok = _run_verify(args.verify, args.cwd) if args.verify else True
+    effective = "success" if (result.outcome == "success" and verify_ok) else "failure"
+
+    write_memory(args.cwd, effective, result.answer or result.message)
 
     for step, block in enumerate(result.reasoning, 1):
         print(f"--- thinking (step {step}) ---", file=sys.stderr)
@@ -281,7 +335,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             elif action == "reject":
                 store.reject_candidate(loop_result.name, reason="rejected interactively")
                 print(f"rejected {loop_result.name}", file=sys.stderr)
-    return 0 if result.outcome == "success" else 1
+
+    return 0 if effective == "success" else 1
 
 
 def main(argv: Optional[list] = None) -> int:

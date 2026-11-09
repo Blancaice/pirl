@@ -116,6 +116,7 @@ class Agent:
         self_gen: SelfGenLoop | None = None,
         skill_store: SkillStore | None = None,
         system_prompt: str = "",
+        memory: str = "",
         max_steps: int = MAX_STEPS,
         on_step: Callable[[StepEvent], None] | None = None,
     ) -> None:
@@ -125,6 +126,7 @@ class Agent:
         self.self_gen = self_gen
         self.skill_store = skill_store
         self.system_prompt = system_prompt
+        self.memory = memory
         self.max_steps = max_steps
         self.on_step = on_step
         self._retrieved: Set[str] = set()
@@ -144,6 +146,13 @@ class Agent:
         sections = [PromptSection("persona", BASE_SYSTEM)]
         if self.system_prompt:
             sections.append(PromptSection("rules", self.system_prompt))
+        if self.memory:
+            sections.append(
+                PromptSection(
+                    "memory",
+                    "Context from your previous run in this workspace:\n" + self.memory,
+                )
+            )
         skills_block = format_skills_for_prompt(self.skills, file_read_tool="read")
         if skills_block:
             sections.append(PromptSection("skills", skills_block))
