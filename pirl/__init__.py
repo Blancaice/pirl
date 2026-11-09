@@ -55,6 +55,7 @@ from .llm import (
     LLMResponseError,
     ToolCall,
     ToolSpec,
+    Usage,
     client_from_env,
 )
 from .generate import (
@@ -65,6 +66,7 @@ from .generate import (
 from .tools import Tool, ToolRegistry, ToolResult, builtin_tools
 from .agent import Agent, FinishCalled, RunResult, StepStart, ToolCalled
 from .run_memory import memory_path, read_memory, write_memory
+from .run_history import RunRecord, RunStore
 from .env import load_dotenv
 from . import ui
 
@@ -105,6 +107,7 @@ __all__ = [
     # LLM client
     "ChatClient",
     "Completion",
+    "Usage",
     "LLMConfigError",
     "LLMError",
     "LLMHTTPError",
@@ -126,10 +129,12 @@ __all__ = [
     "ToolRegistry",
     "ToolResult",
     "builtin_tools",
-    # Run memory + env
+    # Run memory + history + env
     "memory_path",
     "read_memory",
     "write_memory",
+    "RunRecord",
+    "RunStore",
     "load_dotenv",
 ]
 

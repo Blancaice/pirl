@@ -13,7 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+import json
+
 from .llm import ToolSpec
+from .run_history import RunStore
 
 MAX_OUTPUT = 20_000
 _SEARCH_SKIP = frozenset({".git", "__pycache__", ".venv", "node_modules", ".pytest_cache"})
@@ -192,6 +195,35 @@ def _bash(args: Dict[str, Any], workspace: Path) -> ToolResult:
     return ToolResult(_truncate(out) if out else f"(no output, exit {proc.returncode})")
 
 
+def _list_runs(args: Dict[str, Any], workspace: Path) -> ToolResult:
+    runs = RunStore(workspace).list_runs()
+    if not runs:
+        return ToolResult("no past runs")
+    lines = [
+        f"{r['run_id']}\t{r['outcome']}\t{r['started_at']}\t{r['task']}"
+        for r in runs
+    ]
+    return ToolResult(_truncate("\n".join(lines)))
+
+
+def _read_run(args: Dict[str, Any], workspace: Path) -> ToolResult:
+    record = RunStore(workspace).read_run(str(args.get("run_id", "")))
+    if record is None:
+        return ToolResult("", f"run not found: {args.get('run_id', '')}")
+    return ToolResult(_truncate(json.dumps(record.to_dict(), ensure_ascii=False, indent=2)))
+
+
+def _search_history(args: Dict[str, Any], workspace: Path) -> ToolResult:
+    query = str(args.get("query", ""))
+    if not query:
+        return ToolResult("", "query is required")
+    hits = RunStore(workspace).search(query)
+    if not hits:
+        return ToolResult("no matches")
+    lines = [f"{h['run_id']}\t{h['outcome']}\t{h['task']}" for h in hits]
+    return ToolResult(_truncate("\n".join(lines)))
+
+
 def builtin_tools() -> List[Tool]:
     """Return the default coding-agent tool set."""
     return [
@@ -257,5 +289,31 @@ def builtin_tools() -> List[Tool]:
                 "required": ["command"],
             },
             _bash,
+        ),
+        Tool(
+            "list_runs",
+            "List past runs in this workspace (id, outcome, task).",
+            {"type": "object", "properties": {}},
+            _list_runs,
+        ),
+        Tool(
+            "read_run",
+            "Read one past run's full record (trace, answer, usage).",
+            {
+                "type": "object",
+                "properties": {"run_id": {"type": "string", "description": "Run id"}},
+                "required": ["run_id"],
+            },
+            _read_run,
+        ),
+        Tool(
+            "search_history",
+            "Search past runs by a literal query (task/answer/trace).",
+            {
+                "type": "object",
+                "properties": {"query": {"type": "string", "description": "Literal substring"}},
+                "required": ["query"],
+            },
+            _search_history,
         ),
     ]

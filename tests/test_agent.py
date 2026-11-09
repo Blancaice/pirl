@@ -1,7 +1,7 @@
 import json
 
 from pirl.agent import Agent, RunResult, StepStart, ToolCalled
-from pirl.llm import Completion, ToolCall
+from pirl.llm import Completion, ToolCall, Usage
 from pirl.proposal import ToolCall as TraceCall
 from pirl.skills import Skill
 from pirl.tools import ToolRegistry, builtin_tools
@@ -178,6 +178,20 @@ def test_memory_becomes_a_section():
     agent = Agent(_ScriptedClient([]), memory="outcome: success\n\nfixed calc.py")
     names = [s.name for s in agent._system_sections()]
     assert names == ["persona", "memory"]
+
+
+def test_usage_accumulates_across_steps(tmp_path):
+    agent = _agent(
+        tmp_path,
+        [
+            Completion("", [ToolCall("list_files", '{"path": "."}')], usage=Usage(10, 5, 15)),
+            Completion("done", [], usage=Usage(20, 5, 25)),
+        ],
+    )
+    result = agent.run("x")
+    assert result.usage.prompt_tokens == 30
+    assert result.usage.completion_tokens == 10
+    assert result.usage.total_tokens == 40
 
 
 def test_on_step_callback_fires(tmp_path):

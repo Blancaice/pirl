@@ -44,6 +44,7 @@ tests/               # pytest 测试(155 个用例)
 - **项目级 skill**:`run` 除 `~/.pirl/skills/active` 外也扫 `<cwd>/.pirl/skills`(按名去重)。
 - **LLM 重试**:429/5xx/超时指数退避 + 抖动,尊重 `Retry-After`。
 - **确定性验证**:`run --verify "python -m pytest"` 在任务后用退出码判定成败。
+- **token 统计**:跨步骤累加 `usage`(prompt/completion/total),结束打到 stderr。
 - **交互审核**:`run` 生成候选后询问 `[a]ctivate/[r]eject/[s]kip`;另有 `review` / `reject` 命令。
 
 ## A 部分实现要点(照抄 pi)

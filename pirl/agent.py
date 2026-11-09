@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from .lifecycle import SkillStore
-from .llm import ChatClient, ToolSpec
+from .llm import ChatClient, ToolSpec, Usage
 from .loop import LoopResult, SelfGenLoop
 from .prompt import PromptSection, format_skills_for_prompt, render_sections
 from .proposal import ToolCall
@@ -89,6 +89,7 @@ class RunResult:
     outcome: str  # "success" | "failure"
     trace: List[ToolCall] = field(default_factory=list)
     reasoning: List[str] = field(default_factory=list)  # per-step thinking blocks
+    usage: Usage = field(default_factory=Usage)  # total tokens across all steps
     loop_result: Optional[LoopResult] = None
     message: str = ""
 
@@ -131,6 +132,7 @@ class Agent:
         self.on_step = on_step
         self._retrieved: Set[str] = set()
         self._reasoning_log: List[str] = []
+        self._usage = Usage()
 
     def _emit(self, event: StepEvent) -> None:
         if self.on_step is not None:
@@ -193,6 +195,7 @@ class Agent:
         for step in range(1, self.max_steps + 1):
             self._emit(StepStart(step, self.max_steps))
             completion = self.client.complete(messages, tools=tool_specs)
+            self._usage = self._usage + completion.usage
             if completion.reasoning:
                 self._reasoning_log.append(completion.reasoning)
             if not completion.tool_calls:
@@ -267,5 +270,5 @@ class Agent:
         if self.self_gen is not None:
             loop_result = self.self_gen.on_run_end(trace, outcome)
         return RunResult(
-            answer, outcome, trace, list(self._reasoning_log), loop_result, message
+            answer, outcome, trace, list(self._reasoning_log), self._usage, loop_result, message
         )

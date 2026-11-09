@@ -115,6 +115,21 @@ def test_complete_parses_reasoning(monkeypatch):
     assert completion.reasoning == "hmm let me think"
 
 
+def test_complete_parses_usage(monkeypatch):
+    payload = {
+        "choices": [{"message": {"content": "answer"}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *a, **kw: _FakeResponse(json.dumps(payload).encode()),
+    )
+    completion = _client().complete([{"role": "user", "content": "hi"}])
+    assert completion.usage.prompt_tokens == 10
+    assert completion.usage.completion_tokens == 5
+    assert completion.usage.total_tokens == 15
+
+
 def test_complete_reasoning_defaults_to_empty(monkeypatch):
     payload = {"choices": [{"message": {"content": "answer"}}]}
     monkeypatch.setattr(

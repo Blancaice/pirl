@@ -53,6 +53,17 @@ def test_bash(tmp_path):
     assert "hello" in result.content
 
 
+def test_list_runs_tool(tmp_path):
+    from pirl.run_history import RunRecord, RunStore
+
+    RunStore(tmp_path).write_run(
+        RunRecord(run_id="run_0001", task="t", outcome="success", answer="a", started_at="x")
+    )
+    result = _registry(tmp_path).execute("list_runs", {})
+    assert result.error == ""
+    assert "run_0001" in result.content
+
+
 def test_unknown_tool(tmp_path):
     result = _registry(tmp_path).execute("nope", {})
     assert result.error == "unknown tool: nope"

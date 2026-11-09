@@ -55,12 +55,29 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class Usage:
+    """Token accounting for one response (disjoint input/output totals)."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def __add__(self, other: "Usage") -> "Usage":
+        return Usage(
+            self.prompt_tokens + other.prompt_tokens,
+            self.completion_tokens + other.completion_tokens,
+            self.total_tokens + other.total_tokens,
+        )
+
+
+@dataclass(frozen=True)
 class Completion:
     """The assistant message returned by one chat-completions call."""
 
     text: str
     tool_calls: List[ToolCall] = field(default_factory=list)
     reasoning: str = ""  # model's thinking/reasoning, empty for non-reasoning models
+    usage: Usage = field(default_factory=Usage)
 
 
 @dataclass(frozen=True)
@@ -187,7 +204,16 @@ def _parse_completion(raw: str) -> Completion:
     if not isinstance(reasoning, str):
         reasoning = str(reasoning)
 
-    return Completion(text=text, tool_calls=tool_calls, reasoning=reasoning)
+    usage_raw = data.get("usage") or {}
+    usage = Usage(
+        prompt_tokens=int(usage_raw.get("prompt_tokens") or 0),
+        completion_tokens=int(usage_raw.get("completion_tokens") or 0),
+        total_tokens=int(usage_raw.get("total_tokens") or 0),
+    )
+
+    return Completion(
+        text=text, tool_calls=tool_calls, reasoning=reasoning, usage=usage
+    )
 
 
 def _retryable_status(status: int) -> bool:

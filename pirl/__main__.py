@@ -262,6 +262,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from .llm import LLMConfigError, LLMError, client_from_env
     from .loop import SelfGenLoop
     from .run_memory import read_memory, write_memory
+    from .run_history import RunRecord, RunStore, new_run_id, now_iso
     from .skills import discover_skills
     from .tools import ToolRegistry, builtin_tools
 
@@ -305,6 +306,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         max_steps=args.max_steps,
         on_step=lambda event: print(render_step(event), file=sys.stderr, flush=True),
     )
+    started_at = now_iso()
     try:
         result = agent.run(args.task)
     except LLMError as error:
@@ -316,11 +318,31 @@ def _cmd_run(args: argparse.Namespace) -> int:
     effective = "success" if (result.outcome == "success" and verify_ok) else "failure"
 
     write_memory(args.cwd, effective, result.answer or result.message)
+    RunStore(args.cwd).write_run(
+        RunRecord(
+            run_id=new_run_id(),
+            task=args.task,
+            outcome=effective,
+            answer=result.answer or result.message,
+            started_at=started_at,
+            trace=[{"tool": tc.name, "args": tc.args} for tc in result.trace],
+            usage={
+                "prompt_tokens": result.usage.prompt_tokens,
+                "completion_tokens": result.usage.completion_tokens,
+                "total_tokens": result.usage.total_tokens,
+            },
+        )
+    )
 
     for step, block in enumerate(result.reasoning, 1):
         print(f"--- thinking (step {step}) ---", file=sys.stderr)
         print(block, file=sys.stderr)
     print(result.answer or f"[{result.outcome}] {result.message}", flush=True)
+    usage = result.usage
+    print(
+        f"[usage] ↑{usage.prompt_tokens} ↓{usage.completion_tokens} Σ{usage.total_tokens}",
+        file=sys.stderr,
+    )
     if result.loop_result is not None:
         loop_result = result.loop_result
         print(
