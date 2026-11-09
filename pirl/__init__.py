@@ -68,6 +68,12 @@ from .agent import Agent, FinishCalled, RunResult, StepStart, ToolCalled
 from .run_memory import memory_path, read_memory, write_memory
 from .run_history import RunRecord, RunStore
 from .git_snapshot import GitSnapshot, is_git, restore, snapshot
+from .compaction import (
+    compact,
+    default_summarizer,
+    estimate_messages_tokens,
+    estimate_tokens,
+)
 from .env import load_dotenv
 from . import ui
 
@@ -140,6 +146,10 @@ __all__ = [
     "is_git",
     "snapshot",
     "restore",
+    "compact",
+    "default_summarizer",
+    "estimate_messages_tokens",
+    "estimate_tokens",
     "load_dotenv",
 ]
 

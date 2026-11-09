@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
+from .compaction import compact, default_summarizer, estimate_messages_tokens
 from .lifecycle import SkillStore
 from .llm import ChatClient, ToolSpec, Usage
 from .loop import LoopResult, SelfGenLoop
@@ -121,6 +122,9 @@ class Agent:
         memory: str = "",
         max_steps: int = MAX_STEPS,
         verify_command: str | None = None,
+        context_budget: int | None = 16000,
+        keep_recent: int = 6,
+        summarize: Callable[[str], str] | None = None,
         on_step: Callable[[StepEvent], None] | None = None,
     ) -> None:
         self.client = client
@@ -132,6 +136,9 @@ class Agent:
         self.memory = memory
         self.max_steps = max_steps
         self.verify_command = verify_command
+        self.context_budget = context_budget
+        self.keep_recent = keep_recent
+        self.summarize = summarize or default_summarizer(client)
         self.on_step = on_step
         self._retrieved: Set[str] = set()
         self._reasoning_log: List[str] = []
@@ -219,6 +226,10 @@ class Agent:
         trace: List[ToolCall] = []
 
         for step in range(1, self.max_steps + 1):
+            if self.context_budget and estimate_messages_tokens(messages) > self.context_budget:
+                messages = compact(
+                    self.summarize, messages, user_message, keep_recent=self.keep_recent
+                )
             self._emit(StepStart(step, self.max_steps))
             completion = self.client.complete(messages, tools=tool_specs)
             self._usage = self._usage + completion.usage
