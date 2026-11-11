@@ -1,6 +1,6 @@
 # pirl 状态记录
 
-> 最后更新:compaction 完成(commit `a75899c`)。
+> 最后更新:harness 抽取 + Agent 内核协议化 + rust-exec(commit `2fcb1a9`)。
 > 参考:pi(`/home/blanca/pi-reference`)、dsh(`/home/blanca/deepseek-harness`)、
 > ai-agent-book skills(`context-engineering` / `context-compression` /
 > `loop-engineering` / `coding-agent-harness`)。
@@ -35,6 +35,7 @@ pirl 是一个本地 coding agent,核心是**可自生成的 skill 系统**:
 | `3f84d1a` | token 统计 + run 历史落盘(list_runs/read_run/search_history 按需检索) |
 | `db38bda` | 循环内验证器(finish gate)+ git 快照回退(`restore`) |
 | `a75899c` | compaction(阈值触发蒸馏旧 tool results) |
+| `2fcb1a9` | 运行时 harness 抽取 + Agent 内核协议化(Protocols)+ rust-exec 沙箱 + 安全默认(bash 默认关/ExecutionPolicy/脱敏/adopt_skill 归因/checkpoint/并行工具) |
 
 ## 需要做的(按优先级)
 
@@ -45,7 +46,7 @@ pirl 是一个本地 coding agent,核心是**可自生成的 skill 系统**:
 ### 中
 
 - [ ] **专门 agent(preset/subagent)** —— "大方向二":preset = 模型 + 提示 + 工具子集 + skill 子集,派生子 agent(参考 pi 的 `examples/extensions/subagent/`)。
-- [ ] **bash 沙箱** —— 工作区泄漏的硬解:bwrap(Linux)/ seatbelt(macOS),目前 bash 靠 prompt 约束,文件工具已用代码隔离。
+- [x] **bash 沙箱** —— 已由 `rust-exec/` crate 提供(argv-only + workspace guard + rlimit + 网络隔离 + 超时进程组清理);宿主需 `cargo build` 并设 `PIRL_EXECUTOR` 才启用。ExecutionPolicy 是软约束,不是 OS 级隔离。
 - [ ] **run 内 compaction 五层补齐** —— 已有第 1 层(工具结果截断)和第 4 层(归档摘要);第 2 层(噪声删除)、第 5 层(全量 LLM 压缩 + 失败熔断)未做。
 
 ### 低
@@ -64,7 +65,7 @@ pirl 是一个本地 coding agent,核心是**可自生成的 skill 系统**:
 ```
 scan / prompt / expand          # Part A:发现 / 渐进披露 / 展开
 init / ls / activate / reject / review / retire / verify   # Part B:生命周期
-run [--cwd] [--max-steps] [--verify CMD]   # 端到端
+run [--cwd] [--max-steps] [--verify CMD] [--allow-bash]   # 端到端(bash 默认关)
 restore <run_id> [--cwd]        # git 回退
 ```
 
@@ -72,4 +73,5 @@ restore <run_id> [--cwd]        # git 回退
 
 ```
 PIRL_BASE_URL  PIRL_API_KEY  PIRL_MODEL
+PIRL_EXECUTOR=/path/to/pirl-exec   # 可选:启用 Rust 沙箱
 ```

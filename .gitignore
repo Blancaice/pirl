@@ -18,5 +18,8 @@ htmlcov/
 # Local skills store (runtime data)
 .pirl/
 
+# Rust
+rust-exec/target/
+
 # OS
 .DS_Store
