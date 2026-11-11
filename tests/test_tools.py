@@ -1,4 +1,6 @@
-from pirl.tools import ToolRegistry, builtin_tools
+import json
+
+from pirl.tools import ExecutionPolicy, ToolRegistry, builtin_tools
 
 
 def _registry(tmp_path):
@@ -51,6 +53,39 @@ def test_bash(tmp_path):
     result = _registry(tmp_path).execute("bash", {"command": "echo hello"})
     assert result.error == ""
     assert "hello" in result.content
+
+
+def test_bash_policy_rejects_escape_and_destructive_commands(tmp_path):
+    reg = _registry(tmp_path)
+    assert reg.execute("bash", {"command": "cat /etc/passwd"}).error
+    assert reg.execute("bash", {"command": "rm -rf ."}).error
+
+
+def test_bash_can_be_disabled_by_host_policy(tmp_path):
+    reg = ToolRegistry(tmp_path, builtin_tools(), policy=ExecutionPolicy(allow_bash=False))
+    result = reg.execute("bash", {"command": "echo hello"})
+    assert "disabled by policy" in result.error
+
+
+def test_apply_patch_is_workspace_scoped(tmp_path):
+    (tmp_path / "a.txt").write_text("old\n", encoding="utf-8")
+    patch = """diff --git a/a.txt b/a.txt
+index 3367afd..3b18e13 100644
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+"""
+    result = _registry(tmp_path).execute("apply_patch", {"patch": patch})
+    assert result.error == ""
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "new\n"
+
+
+def test_tool_result_has_machine_readable_envelope(tmp_path):
+    result = _registry(tmp_path).execute("nope", {})
+    payload = json.loads(result.to_message())
+    assert payload == {"ok": False, "content": "", "error": "unknown tool: nope"}
 
 
 def test_list_runs_tool(tmp_path):

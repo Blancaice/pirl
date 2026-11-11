@@ -9,6 +9,7 @@ context stays bounded (the same pattern as on-demand skill loading).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,8 +72,9 @@ class RunStore:
     def write_run(self, record: RunRecord) -> Path:
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         path = self.runs_dir / f"run_{record.run_id}.json"
+        payload = _redact(record.to_dict())
         path.write_text(
-            json.dumps(record.to_dict(), ensure_ascii=False, indent=2) + "\n",
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
         return path
@@ -124,3 +126,21 @@ class RunStore:
             return RunRecord.from_dict(data)
         except (OSError, json.JSONDecodeError, TypeError):
             return None
+
+
+_SECRET_RE = re.compile(
+    r"(?i)(\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|password|secret)\b\s*[:=]\s*)([^\s,;&]+)"
+)
+_BEARER_RE = re.compile(r"(?i)(\bbearer\s+)([^\s]+)")
+
+
+def _redact(value):
+    """Redact common credential-shaped strings before durable persistence."""
+    if isinstance(value, str):
+        value = _SECRET_RE.sub(r"\1[REDACTED]", value)
+        return _BEARER_RE.sub(r"\1[REDACTED]", value)
+    if isinstance(value, list):
+        return [_redact(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact(item) for key, item in value.items()}
+    return value

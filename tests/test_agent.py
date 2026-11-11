@@ -121,7 +121,8 @@ def test_skill_usage_is_tracked(tmp_path):
     skill_path = _activate_skill(store)
     client = _ScriptedClient([
         Completion("", [ToolCall("read_file", json.dumps({"path": skill_path}), "c1")]),
-        Completion("", [ToolCall("finish", json.dumps({"success": True, "summary": "ok"}), "c2")]),
+        Completion("", [ToolCall("adopt_skill", json.dumps({"name": "foo", "reason": "used its procedure"}), "c2")]),
+        Completion("", [ToolCall("finish", json.dumps({"success": True, "summary": "ok"}), "c3")]),
     ])
     agent = Agent(client, tools=ToolRegistry(tmp_path, builtin_tools()), skill_store=store)
     result = agent.run("use foo")
@@ -140,7 +141,8 @@ def test_failed_skill_use_records_failure(tmp_path):
     skill_path = _activate_skill(store)
     client = _ScriptedClient([
         Completion("", [ToolCall("read_file", json.dumps({"path": skill_path}), "c1")]),
-        Completion("", [ToolCall("finish", json.dumps({"success": False, "summary": "nope"}), "c2")]),
+        Completion("", [ToolCall("adopt_skill", json.dumps({"name": "foo", "reason": "used its procedure"}), "c2")]),
+        Completion("", [ToolCall("finish", json.dumps({"success": False, "summary": "nope"}), "c3")]),
     ])
     agent = Agent(client, tools=ToolRegistry(tmp_path, builtin_tools()), skill_store=store)
     agent.run("use foo")
@@ -194,6 +196,16 @@ def test_usage_accumulates_across_steps(tmp_path):
     assert result.usage.total_tokens == 40
 
 
+def test_usage_resets_between_runs(tmp_path):
+    client = _ScriptedClient([
+        Completion("one", [], usage=Usage(10, 2, 12)),
+        Completion("two", [], usage=Usage(3, 1, 4)),
+    ])
+    agent = Agent(client, tools=ToolRegistry(tmp_path, builtin_tools()))
+    assert agent.run("first").usage.total_tokens == 12
+    assert agent.run("second").usage.total_tokens == 4
+
+
 def test_verify_accepts_finish_when_passing(tmp_path):
     agent = _agent(
         tmp_path,
@@ -232,6 +244,24 @@ def test_verify_failure_feedback_reaches_model(tmp_path):
     second_messages = client.calls[1][0]
     tool_contents = [m.get("content", "") for m in second_messages if m.get("role") == "tool"]
     assert any("verification failed" in c for c in tool_contents)
+
+
+def test_plain_text_cannot_bypass_failing_verification(tmp_path):
+    client = _ScriptedClient([Completion("done", []), Completion("still done", [])])
+    agent = Agent(
+        client,
+        tools=ToolRegistry(tmp_path, builtin_tools()),
+        verify_command="false",
+        max_steps=2,
+    )
+    result = agent.run("x")
+    assert result.outcome == "failure"
+    assert result.message == "max steps exceeded"
+    assert any(
+        "verification failed" in m.get("content", "")
+        for m in client.calls[1][0]
+        if m.get("role") == "user"
+    )
 
 
 def test_on_step_callback_fires(tmp_path):

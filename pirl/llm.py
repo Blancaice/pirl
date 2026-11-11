@@ -166,6 +166,24 @@ class ChatClient:
 
         raise LLMError("retries exhausted")  # pragma: no cover - unreachable
 
+    def stream(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        *,
+        tools: Sequence[ToolSpec] = (),
+        on_delta: Any | None = None,
+    ) -> Completion:
+        """Streaming-compatible facade.
+
+        Providers without an SSE adapter still get a single final delta. The
+        runner can depend on this interface now; a provider-specific client
+        may override it with true incremental chunks later.
+        """
+        completion = self.complete(messages, tools=tools)
+        if on_delta is not None and completion.text:
+            on_delta(completion.text)
+        return completion
+
     def __repr__(self) -> str:
         return f"ChatClient(base_url={self.base_url!r}, model={self.model!r})"
 

@@ -33,12 +33,13 @@ def render_sections(sections: Iterable[PromptSection]) -> str:
     return "\n\n".join(s.text.strip() for s in sections if s.text.strip())
 
 
-FileReadTool = Literal["read", "bash", "indirect"]
+FileReadTool = Literal["read", "read_file", "bash", "indirect"]
 
 _INTRO = "\n\nThe following skills provide specialized instructions for specific tasks."
 
 _READ_TOOL_LINES = {
-    "read": "Use the read tool to load a skill's file when the task matches its description.",
+    "read": "Use the read tool (`read_file`) to load a skill's file when the task matches its description.",
+    "read_file": "Use the read tool (`read_file`) to load a skill's file when the task matches its description.",
     "bash": "Use bash to load a skill's file when the task matches its description.",
     "indirect": "Load a skill's file when the task matches its description.",
 }

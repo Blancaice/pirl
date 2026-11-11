@@ -29,14 +29,22 @@ def estimate_tokens(text: str) -> int:
 
 
 def estimate_messages_tokens(messages: Sequence[Dict[str, Any]]) -> int:
-    return sum(estimate_tokens(str(m.get("content", ""))) for m in messages)
+    return sum(estimate_tokens(_message_text(m)) for m in messages)
+
+
+def _message_text(message: Dict[str, Any]) -> str:
+    """Render all context-bearing fields, including assistant tool calls."""
+    parts = [str(message.get("content", ""))]
+    if message.get("tool_calls"):
+        parts.append(str(message["tool_calls"]))
+    return "\n".join(parts)
 
 
 def render_messages(messages: Sequence[Dict[str, Any]]) -> str:
     lines: List[str] = []
     for m in messages:
         role = str(m.get("role", ""))
-        content = str(m.get("content", ""))
+        content = _message_text(m)
         lines.append(f"<{role}>\n{content}\n</{role}>")
     return "\n".join(lines)
 
@@ -57,8 +65,14 @@ def compact(
     if len(messages) <= keep_recent + 2:
         return messages
 
-    middle = messages[1 : len(messages) - keep_recent]
-    tail = messages[len(messages) - keep_recent :]
+    boundary = len(messages) - keep_recent
+    # Tool results are protocol-coupled to the preceding assistant tool_calls
+    # message. Never keep an orphaned tool result after compaction.
+    while boundary > 1 and messages[boundary].get("role") == "tool":
+        boundary -= 1
+
+    middle = messages[1:boundary]
+    tail = messages[boundary:]
 
     # Skip when the middle is tiny — summarizing noise just wastes tokens.
     if estimate_messages_tokens(middle) < 200:

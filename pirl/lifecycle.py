@@ -58,8 +58,12 @@ class SkillRecord:
     version: int = 1  # +1 on every revise
     # --- utility stats ---
     retrievals: int = 0  # times recalled into the prompt
-    adoptions: int = 0  # times adopted and the task succeeded
-    failures: int = 0  # times adopted and the task failed
+    adoptions: int = 0  # compatibility alias for explicit applications
+    failures: int = 0  # compatibility alias for explicit application failures
+    applications: int = 0
+    application_successes: int = 0
+    application_failures: int = 0
+    unknown_outcomes: int = 0
     # --- audit ---
     reviewer: str = ""
     activate_reason: str = ""
@@ -71,10 +75,15 @@ class SkillRecord:
 
     @property
     def success_rate(self) -> float:
-        """Adoption success rate (1.0 when there are no adoptions yet)."""
-        if self.adoptions == 0:
+        """Explicit-application success rate; unknown outcomes are excluded."""
+        observed = self.application_successes + self.application_failures
+        # Read old registries written before explicit application metrics.
+        if observed == 0 and self.adoptions:
+            observed = self.adoptions
+            return (self.adoptions - self.failures) / observed
+        if observed == 0:
             return 1.0
-        return (self.adoptions - self.failures) / self.adoptions
+        return self.application_successes / observed
 
 
 _FIELD_NAMES = [f.name for f in fields(SkillRecord)]
@@ -227,6 +236,10 @@ class SkillStore:
             retrievals=existing.retrievals,
             adoptions=existing.adoptions,
             failures=existing.failures,
+            applications=existing.applications,
+            application_successes=existing.application_successes,
+            application_failures=existing.application_failures,
+            unknown_outcomes=existing.unknown_outcomes,
             reviewer=reviewer,
             activate_reason=reason,
             activated_at=now_iso(),
@@ -257,6 +270,10 @@ class SkillStore:
             retrievals=existing.retrievals,
             adoptions=existing.adoptions,
             failures=existing.failures,
+            applications=existing.applications,
+            application_successes=existing.application_successes,
+            application_failures=existing.application_failures,
+            unknown_outcomes=existing.unknown_outcomes,
             reviewer=existing.reviewer,
             activate_reason=existing.activate_reason,
             activated_at=existing.activated_at,
@@ -289,6 +306,10 @@ class SkillStore:
             retrievals=existing.retrievals,
             adoptions=existing.adoptions,
             failures=existing.failures,
+            applications=existing.applications,
+            application_successes=existing.application_successes,
+            application_failures=existing.application_failures,
+            unknown_outcomes=existing.unknown_outcomes,
             reviewer=existing.reviewer,
             activate_reason=existing.activate_reason,
             retired_at=now_iso(),
@@ -324,17 +345,23 @@ class SkillStore:
         return record
 
     def on_adopt(self, name: str, success: bool) -> SkillRecord:
-        """Record one adoption (self-healing, like :meth:`on_retrieve`).
+        """Backward-compatible alias for an explicit application."""
+        return self.on_apply(name, success)
 
-        ``adoptions`` always increments (total adoptions); ``failures`` only
-        increments when ``success`` is False.
-        """
+    def on_apply(self, name: str, success: bool | None) -> SkillRecord:
+        """Record explicit skill use; retrieval alone never calls this."""
         record = self.get(name)
         if record is None:
             record = SkillRecord(name=name, status=STATUS_ACTIVE, created_at=now_iso())
-        record.adoptions += 1
-        if not success:
-            record.failures += 1
+        record.applications += 1
+        record.adoptions = record.applications
+        if success is True:
+            record.application_successes += 1
+        elif success is False:
+            record.application_failures += 1
+            record.failures = record.application_failures
+        else:
+            record.unknown_outcomes += 1
         self._upsert(record)
         return record
 

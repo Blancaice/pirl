@@ -31,6 +31,27 @@ def test_restore_reverts_changes(tmp_path):
     assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "v1"
 
 
+def test_restore_preserves_preexisting_tracked_changes(tmp_path):
+    _init_git(tmp_path)
+    (tmp_path / "a.txt").write_text("preexisting", encoding="utf-8")
+    snap = snapshot(tmp_path)
+    (tmp_path / "a.txt").write_text("agent change", encoding="utf-8")
+    restore(tmp_path, snap)
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "preexisting"
+
+
+def test_restore_refuses_preexisting_untracked_files(tmp_path):
+    _init_git(tmp_path)
+    (tmp_path / "new.txt").write_text("keep", encoding="utf-8")
+    snap = snapshot(tmp_path)
+    try:
+        restore(tmp_path, snap)
+    except RuntimeError as exc:
+        assert "untracked" in str(exc)
+    else:
+        raise AssertionError("restore should refuse untracked pre-run files")
+
+
 def test_is_git(tmp_path):
     assert not is_git(tmp_path)
     _init_git(tmp_path)

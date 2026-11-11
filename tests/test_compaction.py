@@ -57,6 +57,42 @@ def test_compact_noop_when_middle_tiny():
     assert compact(lambda t: "never", messages, "t", keep_recent=2) == messages
 
 
+def test_compact_keeps_assistant_with_recent_tool_results():
+    assistant = {
+        "role": "assistant",
+        "tool_calls": [{"id": "c1", "function": {"name": "read_file"}}],
+    }
+    messages = [
+        _msg("system", "s"),
+        _msg("user", "x" * 1000),
+        _msg("assistant", "old"),
+        assistant,
+        _msg("tool", "result one"),
+        _msg("tool", "result two"),
+    ]
+    out = compact(lambda text: "summary", messages, "task", keep_recent=2)
+    assert assistant in out
+    first_tool = next(i for i, message in enumerate(out) if message["role"] == "tool")
+    assert out[first_tool - 1] is assistant
+
+
+def test_compaction_summary_includes_tool_calls():
+    seen = []
+    messages = [
+        _msg("system", "s"),
+        _msg("user", "x" * 1000),
+        {
+            "role": "assistant",
+            "tool_calls": [{"function": {"name": "write_file", "arguments": "{}"}}],
+        },
+        _msg("tool", "old result"),
+        _msg("assistant", "recent"),
+        _msg("user", "continue"),
+    ]
+    compact(lambda text: seen.append(text) or "summary", messages, "task", keep_recent=2)
+    assert "write_file" in seen[0]
+
+
 def test_agent_compacts_when_over_budget(tmp_path):
     calls = []
 

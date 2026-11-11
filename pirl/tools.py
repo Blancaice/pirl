@@ -1,19 +1,24 @@
 """Built-in workspace tools and the registry the agent dispatches through.
 
-Tools run with the process's OS permissions, confined to ``workspace``: file
-tools reject paths that resolve outside the workspace. ``bash`` runs with
-``cwd=workspace``. Tool output is truncated to keep model context bounded.
+File tools reject paths that resolve outside ``workspace``. ``bash`` runs with
+``cwd=workspace`` and passes through an explicit :class:`ExecutionPolicy`; this
+is a command-policy gate, not an OS-level sandbox. Hosts requiring isolation
+must inject a sandboxed executor. Tool output is truncated to bound context.
 """
 
 from __future__ import annotations
 
 import os
+import signal
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import json
+import re
+import shlex
 
 from .llm import ToolSpec
 from .run_history import RunStore
@@ -29,6 +34,45 @@ class ToolResult:
     content: str
     error: str = ""
 
+    @property
+    def ok(self) -> bool:
+        return not bool(self.error)
+
+    def to_message(self, *, source: str | None = None, trust: str | None = None) -> str:
+        """Stable, machine-readable envelope for the model-facing protocol."""
+        payload = {"ok": self.ok, "content": self.content, "error": self.error}
+        if source is not None:
+            payload["source"] = source
+        if trust is not None:
+            payload["trust"] = trust
+        return json.dumps(payload, ensure_ascii=False)
+
+
+@dataclass(frozen=True)
+class ExecutionPolicy:
+    """Policy gate for process execution.
+
+    This is deliberately not advertised as a sandbox: OS-level isolation must
+    be supplied by the host. The default blocks common escape/destructive
+    commands while keeping normal repository commands usable.
+    """
+
+    allow_bash: bool = True
+    deny_patterns: tuple[str, ...] = (
+        r"\brm\s+(-[^\s]*f[^\s]*\s+)*-?r",
+        r"\bgit\s+reset\s+--hard\b",
+        r"\b(curl|wget|ssh|scp|nc|telnet)\b",
+        r"(?:^|[\s;|&])/(?:etc|home|root|proc|sys|dev)(?:/|\b)",
+    )
+
+    def check_bash(self, command: str) -> str:
+        if not self.allow_bash:
+            return "bash execution disabled by policy"
+        for pattern in self.deny_patterns:
+            if re.search(pattern, command, flags=re.IGNORECASE):
+                return f"bash command rejected by policy: {pattern}"
+        return ""
+
 
 @dataclass(frozen=True)
 class Tool:
@@ -38,6 +82,7 @@ class Tool:
     description: str
     parameters: Dict[str, Any]
     execute: Callable[[Dict[str, Any], Path], ToolResult]
+    parallel_safe: bool = False
 
     def to_spec(self) -> ToolSpec:
         return ToolSpec(self.name, self.description, self.parameters)
@@ -46,17 +91,46 @@ class Tool:
 class ToolRegistry:
     """Name -> Tool lookup; resolves paths against a fixed workspace."""
 
-    def __init__(self, workspace: str | Path, tools: Sequence[Tool] = ()) -> None:
+    def __init__(self, workspace: str | Path, tools: Sequence[Tool] = (), *, policy: ExecutionPolicy | None = None, executor: Any | None = None) -> None:
         self.workspace = Path(workspace).resolve()
+        self.policy = policy or ExecutionPolicy()
+        self.executor = executor
         self._tools: Dict[str, Tool] = {t.name: t for t in tools}
 
     def specs(self) -> List[ToolSpec]:
         return [t.to_spec() for t in self._tools.values()]
 
+    def can_parallel(self, names: Sequence[str]) -> bool:
+        """Only explicitly read-only tools may run concurrently."""
+        return bool(names) and all(self._tools.get(name) is not None and self._tools[name].parallel_safe for name in names)
+
     def execute(self, name: str, args: Dict[str, Any]) -> ToolResult:
         tool = self._tools.get(name)
         if tool is None:
             return ToolResult("", f"unknown tool: {name}")
+        if name == "bash":
+            command = args.get("command", "")
+            if not isinstance(command, str):
+                return ToolResult("", "command must be a string")
+            reason = self.policy.check_bash(command)
+            if reason:
+                return ToolResult("", reason)
+            if self.executor is not None:
+                try:
+                    argv = shlex.split(command)
+                    shell_tokens = (";", "&&", "||", "|", ">", "<", "`", "$(")
+                    if any(token in command for token in shell_tokens):
+                        return ToolResult("", "rust executor accepts argv only; shell syntax is rejected")
+                    result = self.executor.execute(argv)
+                    return ToolResult(result.get("stdout", "") + ("\n[stderr]\n" + result["stderr"] if result.get("stderr") else ""), "" if result.get("ok") else f"exit {result.get('code')}")
+                except Exception as exc:
+                    return ToolResult("", f"rust executor failed: {exc}")
+        if name == "apply_patch" and self.executor is not None:
+            try:
+                result = self.executor.apply_patch(str(args.get("patch", "")))
+                return ToolResult("patch applied" if result.get("ok", True) else "", str(result.get("error", "")))
+            except Exception as exc:
+                return ToolResult("", f"rust executor failed: {exc}")
         try:
             return tool.execute(args, self.workspace)
         except Exception as exc:  # noqa: BLE001 - tool impls touch fs/process
@@ -148,6 +222,31 @@ def _search(args: Dict[str, Any], workspace: Path) -> ToolResult:
     if root is None:
         return ToolResult("", "path escapes workspace")
 
+    # Prefer ripgrep for large repositories; retain the pure-Python fallback
+    # for minimal hosts where rg is unavailable.
+    rg = shutil.which("rg")
+    if rg:
+        command = [rg, "--fixed-strings", "--line-number", "--no-heading", "--color", "never"]
+        for skipped in _SEARCH_SKIP:
+            command.extend(["--glob", f"!{skipped}/**"])
+        command.extend([pattern, str(root)])
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            proc = None
+        if proc is not None:
+            if proc.returncode not in (0, 1):
+                return ToolResult("", proc.stderr.strip() or "search failed")
+            lines = []
+            for line in proc.stdout.splitlines()[:200]:
+                try:
+                    file_name, lineno, text = line.split(":", 2)
+                    display = str(Path(file_name).resolve().relative_to(workspace))
+                    lines.append(f"{display}:{lineno}:{text}")
+                except ValueError:
+                    lines.append(line)
+            return ToolResult(_truncate("\n".join(lines)) if lines else "no matches")
+
     hits: List[str] = []
     for p in sorted(root.rglob("*")):
         if not p.is_file():
@@ -174,25 +273,62 @@ def _bash(args: Dict[str, Any], workspace: Path) -> ToolResult:
     if not isinstance(command, str) or not command.strip():
         return ToolResult("", "command is required")
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             command,
             shell=True,
             cwd=workspace,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=60,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        return ToolResult("", "command timed out after 60s")
+        try:
+            stdout, stderr = proc.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait()
+            return ToolResult("", "command timed out after 60s")
     except OSError as exc:
         return ToolResult("", str(exc))
 
-    out = proc.stdout
-    if proc.stderr:
-        out += ("\n[stderr]\n" if out else "[stderr]\n") + proc.stderr
+    out = stdout
+    if stderr:
+        out += ("\n[stderr]\n" if out else "[stderr]\n") + stderr
     if proc.returncode != 0:
         out += f"\n[exit {proc.returncode}]"
     return ToolResult(_truncate(out) if out else f"(no output, exit {proc.returncode})")
+
+
+def _apply_patch(args: Dict[str, Any], workspace: Path) -> ToolResult:
+    patch = args.get("patch", "")
+    if not isinstance(patch, str) or not patch.strip():
+        return ToolResult("", "patch is required")
+    try:
+        checked = subprocess.run(
+            ["git", "apply", "--check", "--whitespace=nowarn", "-"],
+            cwd=workspace,
+            input=patch,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if checked.returncode != 0:
+            return ToolResult("", f"patch rejected: {checked.stderr.strip()}")
+        applied = subprocess.run(
+            ["git", "apply", "--whitespace=nowarn", "-"],
+            cwd=workspace,
+            input=patch,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        return ToolResult("", "patch timed out after 30s")
+    except OSError as exc:
+        return ToolResult("", str(exc))
+    if applied.returncode != 0:
+        return ToolResult("", f"patch failed: {applied.stderr.strip()}")
+    return ToolResult("patch applied")
 
 
 def _list_runs(args: Dict[str, Any], workspace: Path) -> ToolResult:
@@ -237,6 +373,7 @@ def builtin_tools() -> List[Tool]:
                 },
             },
             _list_files,
+            True,
         ),
         Tool(
             "read_file",
@@ -251,6 +388,7 @@ def builtin_tools() -> List[Tool]:
                 "required": ["path"],
             },
             _read_file,
+            True,
         ),
         Tool(
             "write_file",
@@ -277,6 +415,7 @@ def builtin_tools() -> List[Tool]:
                 "required": ["pattern"],
             },
             _search,
+            True,
         ),
         Tool(
             "bash",
@@ -291,10 +430,21 @@ def builtin_tools() -> List[Tool]:
             _bash,
         ),
         Tool(
+            "apply_patch",
+            "Apply a unified git patch inside the workspace. Prefer this for targeted edits.",
+            {
+                "type": "object",
+                "properties": {"patch": {"type": "string", "description": "Unified diff"}},
+                "required": ["patch"],
+            },
+            _apply_patch,
+        ),
+        Tool(
             "list_runs",
             "List past runs in this workspace (id, outcome, task).",
             {"type": "object", "properties": {}},
             _list_runs,
+            True,
         ),
         Tool(
             "read_run",
@@ -305,6 +455,7 @@ def builtin_tools() -> List[Tool]:
                 "required": ["run_id"],
             },
             _read_run,
+            True,
         ),
         Tool(
             "search_history",
@@ -315,5 +466,6 @@ def builtin_tools() -> List[Tool]:
                 "required": ["query"],
             },
             _search_history,
+            True,
         ),
     ]

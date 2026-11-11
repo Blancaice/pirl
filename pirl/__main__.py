@@ -18,6 +18,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import List, Optional
 
@@ -83,6 +84,11 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("task")
     run.add_argument("--cwd", default=".")
     run.add_argument("--max-steps", type=int, default=20)
+    run.add_argument(
+        "--allow-bash",
+        action="store_true",
+        help="enable shell execution (unsafe; bash is not an OS-level sandbox)",
+    )
     run.add_argument(
         "--verify",
         default=None,
@@ -230,10 +236,12 @@ def _cmd_review(args: argparse.Namespace) -> int:
 
 
 def _cmd_restore(args: argparse.Namespace) -> int:
+    from pathlib import Path
     from .git_snapshot import GitSnapshot, restore
     from .run_history import RunStore
 
-    record = RunStore(args.cwd).read_run(args.run_id)
+    workspace = Path(args.cwd).expanduser().resolve()
+    record = RunStore(workspace).read_run(args.run_id)
     if record is None or record.git is None:
         print(f"no git snapshot for run {args.run_id}", file=sys.stderr)
         return 1
@@ -244,7 +252,7 @@ def _cmd_restore(args: argparse.Namespace) -> int:
     ):
         print("cancelled", file=sys.stderr)
         return 1
-    restore(args.cwd, snap)
+    restore(workspace, snap)
     print(f"restored to {snap.head[:8]}", file=sys.stderr)
     return 0
 
@@ -255,14 +263,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from .agent import Agent, FinishCalled, StepStart, ToolCalled
     from .env import load_dotenv
     from .generate import generator_from_client
-    from .git_snapshot import snapshot
+    from .harness import TaskHarness, TaskSpec
     from .lifecycle import SkillStore
     from .llm import LLMConfigError, LLMError, client_from_env
     from .loop import SelfGenLoop
-    from .run_memory import read_memory, write_memory
-    from .run_history import RunRecord, RunStore, new_run_id, now_iso
+    from .run_memory import read_memory
     from .skills import discover_skills
-    from .tools import ToolRegistry, builtin_tools
+    from .tools import ExecutionPolicy, ToolRegistry, builtin_tools
+    from .rust_exec import executor_from_env
 
     def render_step(event) -> str:
         match event:
@@ -275,6 +283,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             case _:
                 return str(event)
 
+    workspace = Path(args.cwd).expanduser().resolve()
     load_dotenv()
     try:
         client = client_from_env()
@@ -287,12 +296,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
     skills = list(store.load_active_skills().skills)
     # project-local skills: any SKILL.md under <cwd>/.pirl/skills (deduped by name)
     active_names = {s.name for s in skills}
-    for skill in discover_skills(Path(args.cwd) / ".pirl" / "skills", "project").skills:
+    for skill in discover_skills(workspace / ".pirl" / "skills", "project").skills:
         if skill.name not in active_names:
             skills.append(skill)
             active_names.add(skill.name)
 
-    registry = ToolRegistry(args.cwd, builtin_tools())
+    registry = ToolRegistry(
+        workspace,
+        builtin_tools(),
+        policy=ExecutionPolicy(allow_bash=args.allow_bash or bool(os.environ.get("PIRL_EXECUTOR"))),
+        executor=executor_from_env(workspace),
+    )
     loop = SelfGenLoop(store, generator=generator_from_client(client))
     agent = Agent(
         client,
@@ -300,36 +314,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
         tools=registry,
         self_gen=loop,
         skill_store=store,
-        memory=read_memory(args.cwd),
+        memory=read_memory(workspace),
         max_steps=args.max_steps,
         verify_command=args.verify,
         on_step=lambda event: print(render_step(event), file=sys.stderr, flush=True),
     )
-    snap = snapshot(args.cwd)
-    started_at = now_iso()
+    harness = TaskHarness(workspace)
+    spec = TaskSpec.from_values(args.task, workspace, max_steps=args.max_steps, verify=args.verify)
     try:
-        result = agent.run(args.task)
+        run = harness.run(agent, spec)
+        result = run.result
     except LLMError as error:
         print(f"pirl: {error}", file=sys.stderr)
         return 1
-
-    write_memory(args.cwd, result.outcome, result.answer or result.message)
-    RunStore(args.cwd).write_run(
-        RunRecord(
-            run_id=new_run_id(),
-            task=args.task,
-            outcome=result.outcome,
-            answer=result.answer or result.message,
-            started_at=started_at,
-            trace=[{"tool": tc.name, "args": tc.args} for tc in result.trace],
-            usage={
-                "prompt_tokens": result.usage.prompt_tokens,
-                "completion_tokens": result.usage.completion_tokens,
-                "total_tokens": result.usage.total_tokens,
-            },
-            git=snap.to_dict() if snap else None,
-        )
-    )
 
     for step, block in enumerate(result.reasoning, 1):
         print(f"--- thinking (step {step}) ---", file=sys.stderr)

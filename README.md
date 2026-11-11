@@ -27,7 +27,7 @@ pirl/
 ├── env.py           # 最小 .env 加载(不覆盖已 export 的变量,值按字面量)
 ├── ui.py            # ui.confirm / ui.select(TTY 感知,非交互回退)
 └── __main__.py      # CLI(scan / prompt / expand / init / ls / activate / retire / reject / review / verify / run)
-tests/               # pytest 测试(155 个用例)
+tests/               # pytest 测试(192 个用例)
 ```
 
 ## 运行时增强
@@ -81,7 +81,7 @@ draft ──验证通过──▶ candidate ──人工激活──▶ active �
 pip install -r requirements.txt
 
 # 测试
-python -m pytest -q          # 97 passed
+python -m pytest -q          # 192 passed
 
 # ---- Part A ----
 python -m pirl scan <dir>                 # 发现 skill
@@ -167,6 +167,12 @@ export PIRL_API_KEY=...
 export PIRL_MODEL=deepseek-chat
 
 python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo
+
+# bash is disabled by default; explicitly opt in when needed
+python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo --allow-bash
+
+# Optional Rust execution kernel (build rust-exec first):
+# export PIRL_EXECUTOR=/path/to/pirl-exec
 ```
 
 ```python
@@ -180,6 +186,12 @@ agent = Agent(client, skills=store.load_active_skills().skills, tools=registry, 
 result = agent.run("summarize this repo")
 # result.answer / result.outcome / result.trace / result.loop_result
 ```
+
+## Harness 与 Agent 内核
+
+`Agent` 负责模型-工具循环、完成协议、取消、压缩和 checkpoint 回调。任务生命周期由 `pirl.harness.TaskHarness` 负责 workspace snapshot、run memory 和 `RunRecord` 产物。`TaskSpec` 是 CLI、benchmark runner 和未来 replay driver 共用的任务边界。
+
+`pirl.protocols` 提供 `ModelProvider`、`ToolProvider`、`Verifier`、`EventSink` 和 `CheckpointWriter` 这些结构化接口。skill、self-generation、memory、git safety 和 eval 属于可注入的外围能力，不是 Agent kernel 的完成判定。
 
 ## 与 pi 的差异(有意为之)
 

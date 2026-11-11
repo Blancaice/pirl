@@ -39,3 +39,17 @@ def test_search_matches_task(tmp_path):
 
 def test_read_missing_returns_none(tmp_path):
     assert RunStore(tmp_path).read_run("nope") is None
+
+
+def test_write_redacts_credentials(tmp_path):
+    store = RunStore(tmp_path)
+    store.write_run(
+        _record(
+            task="use api_key=supersecret",
+            trace=[{"tool": "bash", "args": "Authorization: Bearer abc123"}],
+        )
+    )
+    raw = next((tmp_path / ".pirl" / "runs").glob("*.json")).read_text()
+    assert "supersecret" not in raw
+    assert "abc123" not in raw
+    assert "[REDACTED]" in raw

@@ -63,8 +63,18 @@ from .generate import (
     generator_from_client,
     parse_proposal_json,
 )
-from .tools import Tool, ToolRegistry, ToolResult, builtin_tools
+from .tools import ExecutionPolicy, Tool, ToolRegistry, ToolResult, builtin_tools
 from .agent import Agent, FinishCalled, RunResult, StepStart, ToolCalled
+from .harness import HarnessResult, TaskHarness, TaskSpec
+from .protocols import (
+    AgentExtension,
+    CheckpointWriter,
+    EventSink,
+    ModelProvider,
+    PromptBuilder,
+    ToolProvider,
+    Verifier,
+)
 from .run_memory import memory_path, read_memory, write_memory
 from .run_history import RunRecord, RunStore
 from .git_snapshot import GitSnapshot, is_git, restore, snapshot
@@ -75,6 +85,11 @@ from .compaction import (
     estimate_tokens,
 )
 from .env import load_dotenv
+from .context import ContextManager
+from .verification import CommandVerifier
+from .checkpoint import CheckpointStore
+from .hooks import SelfGenerationHook, SkillUsageHook
+from .rust_exec import RustExecutor, executor_from_env
 from . import ui
 
 __all__ = [
@@ -129,12 +144,23 @@ __all__ = [
     # Agent runtime
     "Agent",
     "RunResult",
+    "HarnessResult",
+    "TaskHarness",
+    "TaskSpec",
+    "AgentExtension",
+    "CheckpointWriter",
+    "EventSink",
+    "ModelProvider",
+    "PromptBuilder",
+    "ToolProvider",
+    "Verifier",
     "StepStart",
     "ToolCalled",
     "FinishCalled",
     "Tool",
     "ToolRegistry",
     "ToolResult",
+    "ExecutionPolicy",
     "builtin_tools",
     # Run memory + history + env
     "memory_path",
@@ -151,6 +177,13 @@ __all__ = [
     "estimate_messages_tokens",
     "estimate_tokens",
     "load_dotenv",
+    "ContextManager",
+    "CommandVerifier",
+    "CheckpointStore",
+    "SkillUsageHook",
+    "SelfGenerationHook",
+    "RustExecutor",
+    "executor_from_env",
 ]
 
 __version__ = "0.2.0"
