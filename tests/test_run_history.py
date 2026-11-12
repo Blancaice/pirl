@@ -53,3 +53,22 @@ def test_write_redacts_credentials(tmp_path):
     assert "supersecret" not in raw
     assert "abc123" not in raw
     assert "[REDACTED]" in raw
+
+
+def test_execution_topology_roundtrip(tmp_path):
+    store = RunStore(tmp_path)
+    store.write_run(
+        _record(
+            trace=[],
+        )
+    )
+    record = _record(run_id="run_exec")
+    record.execution = {
+        "backend": "direct",
+        "isolation": "none",
+        "approval": "on-request",
+    }
+    store.write_run(record)
+    loaded = store.read_run("run_exec")
+    assert loaded is not None
+    assert loaded.execution == record.execution

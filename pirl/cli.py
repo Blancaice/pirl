@@ -96,6 +96,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="enable shell execution (unsafe; bash is not an OS-level sandbox)",
     )
     run.add_argument(
+        "--executor",
+        default="direct",
+        help="execution backend plugin name (built-ins: direct, none; rust when PIRL_EXECUTOR is set)",
+    )
+    run.add_argument(
+        "--approval",
+        choices=["on-request", "auto", "never"],
+        default="on-request",
+        help=(
+            "process approval policy: ask interactively, run without prompts, "
+            "or deny execution (this is not a sandbox)"
+        ),
+    )
+    run.add_argument(
         "--verify",
         default=None,
         help="command to deterministically verify a finish(success=true)",
@@ -276,8 +290,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from .plugins.skill_learning import FailureCandidateStore, SkillLearningPlugin
     from .plugins.memory import read_memory
     from .plugins.skills import discover_skills
+    from .execution import ApprovalExecutor, PolicyExecutor, builtin_executor_registry
     from .tools import ExecutionPolicy, ToolRegistry, builtin_tools
-    from .rust_exec import executor_from_env
+    from .rust_exec import RustExecutor
 
     def render_step(event) -> str:
         match event:
@@ -312,11 +327,53 @@ def _cmd_run(args: argparse.Namespace) -> int:
             skills.append(skill)
             active_names.add(skill.name)
 
+    execution_policy = ExecutionPolicy(
+        allow_bash=args.allow_bash or bool(os.environ.get("PIRL_EXECUTOR"))
+    )
+    executors = builtin_executor_registry()
+    rust_binary = os.environ.get("PIRL_EXECUTOR", "").strip()
+    if rust_binary:
+        executors.register(
+            "rust", lambda root: RustExecutor(rust_binary, root)
+        )
+    if args.executor not in executors.names():
+        try:
+            executors.load_entry_point(args.executor)
+        except (TypeError, ValueError) as error:
+            print(f"pirl: cannot load executor plugin: {error}", file=sys.stderr)
+            return 2
+    try:
+        executor = executors.create(args.executor, workspace)
+    except ValueError as error:
+        print(f"pirl: {error}", file=sys.stderr)
+        return 2
+    executor = ApprovalExecutor(
+        executor,
+        args.approval,
+        lambda request: ui.confirm(
+            "Allow process execution?\n"
+            f"  backend: {executor.info.name}\n"
+            f"  cwd: {request.workspace}\n"
+            f"  argv: {request.argv!r}\n"
+            + (f"  reason: {request.reason}\n" if request.reason else ""),
+            default=False,
+        ),
+    )
+    executor = PolicyExecutor(
+        executor, lambda request: execution_policy.check_exec(request.argv)
+    )
+    info = executor.info
+    print(
+        f"[execution] backend={info.name} isolation={info.isolation} "
+        f"filesystem={info.filesystem_boundary} network={info.network_boundary} "
+        f"approval={info.approval}",
+        file=sys.stderr,
+    )
     registry = ToolRegistry(
         workspace,
         builtin_tools(),
-        policy=ExecutionPolicy(allow_bash=args.allow_bash or bool(os.environ.get("PIRL_EXECUTOR"))),
-        executor=executor_from_env(workspace),
+        policy=execution_policy,
+        executor=executor,
     )
     loop = SelfGenLoop(store, generator=generator_from_client(client))
     learning = SkillLearningPlugin(

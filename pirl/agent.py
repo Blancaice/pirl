@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from .plugins.compaction import compact, default_summarizer, estimate_messages_tokens
+from .context import ContextManager
+from .execution import ExecRequest
 from .lifecycle import SkillStore
 from .llm import ChatClient, ToolSpec, Usage
 from .plugins.self_generation import LoopResult, SelfGenLoop
@@ -194,7 +196,16 @@ class Agent:
         self.max_tool_workers = max_tool_workers
         self.checkpoint = checkpoint
         self.verifier = verifier
-        self.context_manager = context_manager
+        object_dir = (
+            Path(self.tools.workspace) / ".pirl" / "objects"
+            if self.tools is not None and context_budget
+            else None
+        )
+        self.context_manager = context_manager or (
+            ContextManager(self.summarize, context_budget, keep_recent, object_dir=object_dir)
+            if context_budget
+            else None
+        )
         self.hooks = list(hooks)
         self.stream = stream
         self.on_text = on_text
@@ -220,12 +231,22 @@ class Agent:
             if any(token in command for token in (";", "&&", "||", "|", ">", "<", "`", "$(")):
                 return False, "verification command contains shell syntax; use argv-compatible command"
             try:
-                result = self.tools.executor.execute(shlex.split(command))
+                result = self.tools.executor.execute(
+                    ExecRequest(
+                        tuple(shlex.split(command)),
+                        Path(self.tools.workspace),
+                        "deterministic finish verification",
+                        120,
+                        approved_by_host=True,
+                    )
+                )
             except Exception as exc:
-                return False, f"rust executor failed: {exc}"
-            if result.get("ok"):
+                return False, f"executor failed: {exc}"
+            if result.ok:
                 return True, ""
-            return False, str(result.get("stderr") or result.get("stdout") or f"exit {result.get('code')}")[:2000]
+            return False, str(
+                result.stderr or result.stdout or result.error or f"exit {result.exit_code}"
+            )[:2000]
         workspace = self.tools.workspace if self.tools is not None else "."
         try:
             proc = subprocess.run(
@@ -364,14 +385,21 @@ class Agent:
                 return self._close(trace, "failure", "", "cancelled")
             progress_before = self._workspace_fingerprint()
             if self.context_manager is not None:
-                messages = self.context_manager.maybe_compact(messages, user_message)
+                prepare = getattr(self.context_manager, "prepare", None)
+                wire_messages = (
+                    prepare(messages, user_message)
+                    if prepare is not None
+                    else self.context_manager.maybe_compact(messages, user_message)
+                )
             elif self.context_budget and estimate_messages_tokens(messages) > self.context_budget:
-                messages = compact(self.summarize, messages, user_message, keep_recent=self.keep_recent)
+                wire_messages = compact(self.summarize, messages, user_message, keep_recent=self.keep_recent)
+            else:
+                wire_messages = messages
             self._emit(StepStart(step, self.max_steps))
             if self.stream and hasattr(self.client, "stream"):
-                completion = self.client.stream(messages, tools=tool_specs, on_delta=self.on_text)
+                completion = self.client.stream(wire_messages, tools=tool_specs, on_delta=self.on_text)
             else:
-                completion = self.client.complete(messages, tools=tool_specs)
+                completion = self.client.complete(wire_messages, tools=tool_specs)
             self._usage = self._usage + completion.usage
             if completion.reasoning:
                 self._reasoning_log.append(completion.reasoning)
@@ -515,7 +543,18 @@ class Agent:
 
             if self.checkpoint is not None:
                 self.checkpoint({"schema_version": 1, "step": step, "messages": messages, "trace": [t.__dict__ for t in trace]})
-            if self.max_steps is None and progress_before == self._workspace_fingerprint() and ordinary:
+            # Only tools whose purpose is to mutate workspace files are
+            # expected to change the fingerprint.  Commands such as pytest,
+            # linters, and one-off verification scripts are evidence-gathering
+            # even when they leave source files untouched (cache directories
+            # are intentionally excluded from the fingerprint).
+            mutation_tools = {"write_file", "apply_patch", "edit_file"}
+            attempted_change = any(tc.name in mutation_tools for tc, _ in ordinary)
+            if (
+                self.max_steps is None
+                and attempted_change
+                and progress_before == self._workspace_fingerprint()
+            ):
                 stagnant_steps += 1
                 if stagnant_steps >= self.no_progress_limit:
                     return self._close(trace, "failure", "", "no file or test progress")

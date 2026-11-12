@@ -55,6 +55,8 @@ class TaskHarness:
                 raise
             result = agent.run(spec.task)
         write_memory(self.workspace, result.outcome, result.answer or result.message)
+        executor = getattr(getattr(agent, "tools", None), "executor", None)
+        execution_info = getattr(executor, "info", None)
         record = RunRecord(
             run_id=run_id,
             task=spec.task,
@@ -66,6 +68,17 @@ class TaskHarness:
                    "completion_tokens": result.usage.completion_tokens,
                    "total_tokens": result.usage.total_tokens},
             git=git.to_dict() if git else None,
+            execution=(
+                {
+                    "backend": execution_info.name,
+                    "isolation": execution_info.isolation,
+                    "filesystem_boundary": execution_info.filesystem_boundary,
+                    "network_boundary": execution_info.network_boundary,
+                    "approval": execution_info.approval,
+                }
+                if execution_info is not None
+                else None
+            ),
         )
         path = self.runs.write_run(record)
         return HarnessResult(run_id, result, path, record.git)

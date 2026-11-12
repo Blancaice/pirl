@@ -1,6 +1,7 @@
 import json
 
 from pirl.agent import Agent, RunResult, StepStart, ToolCalled
+from pirl.execution import ApprovalExecutor, DirectExecutor, PolicyExecutor
 from pirl.llm import Completion, ToolCall, Usage
 from pirl.proposal import ToolCall as TraceCall
 from pirl.plugins.skills import Skill
@@ -47,6 +48,48 @@ def test_run_max_steps_is_failure(tmp_path):
     assert result.outcome == "failure"
     assert result.message == "max steps exceeded"
     assert len(result.trace) == 3
+
+
+def test_distinct_verification_commands_do_not_require_file_changes(tmp_path):
+    agent = _agent(
+        tmp_path,
+        [
+            Completion("", [ToolCall("exec", '{"argv":["true"]}', "call_1")]),
+            Completion("", [ToolCall("exec", '{"argv":["printf","ok"]}', "call_2")]),
+            Completion("", [ToolCall("exec", '{"argv":["python","-c","print(1)"]}', "call_3")]),
+            Completion("verified", []),
+        ],
+        no_progress_limit=3,
+    )
+    # Tests use a non-interactive registry by default; approve structured
+    # execution explicitly so this exercises successful verification calls.
+    agent.tools.executor = PolicyExecutor(
+        ApprovalExecutor(DirectExecutor(), "auto"),
+        lambda request: agent.tools.policy.check_exec(request.argv),
+    )
+    result = agent.run("verify the project")
+    assert result.outcome == "success"
+    assert result.answer == "verified"
+
+
+def test_repeated_noop_mutations_still_trigger_no_progress(tmp_path):
+    calls = [
+        Completion(
+            "",
+            [
+                ToolCall(
+                    "apply_patch",
+                    json.dumps({"patch": f"not a valid patch {attempt}"}),
+                    f"call_{attempt}",
+                )
+            ],
+        )
+        for attempt in range(3)
+    ]
+    agent = _agent(tmp_path, calls, no_progress_limit=3)
+    result = agent.run("keep writing the same content")
+    assert result.outcome == "failure"
+    assert result.message == "no file or test progress"
 
 
 def test_run_unknown_tool_reports_error_and_continues(tmp_path):

@@ -29,3 +29,16 @@ def test_total_token_budget_stops_before_next_turn(tmp_path):
     result = agent.run("x")
     assert result.outcome == "failure"
     assert result.message == "max total tokens exceeded (5)"
+
+
+def test_read_only_exploration_does_not_count_as_stagnation(tmp_path):
+    client = Client([
+        Completion("", [ToolCall("list_files", '{"path":"."}')]),
+        Completion("", [ToolCall("read_file", '{"path":"calc.py"}')]),
+        Completion("", [ToolCall("read_file", '{"path":"test_calc.py"}')]),
+        Completion("The files look correct.", []),
+    ])
+    agent = Agent(client, tools=ToolRegistry(tmp_path, builtin_tools()))
+    result = agent.run("inspect the project")
+    assert result.outcome == "success"
+    assert result.answer == "The files look correct."

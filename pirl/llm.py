@@ -10,6 +10,7 @@ Configuration is read from the environment by :func:`client_from_env`:
 * ``PIRL_BASE_URL`` — provider base URL (e.g. ``https://api.deepseek.com/v1``)
 * ``PIRL_API_KEY``  — bearer key
 * ``PIRL_MODEL``    — model id
+* ``PIRL_REQUEST_TIMEOUT`` — optional request timeout in seconds (unset = no timeout)
 """
 
 from __future__ import annotations
@@ -109,7 +110,7 @@ class ChatClient:
         base_url: str,
         api_key: str,
         model: str,
-        timeout: float = 120.0,
+        timeout: Optional[float] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -163,6 +164,15 @@ class ChatClient:
                     time.sleep(_backoff(attempt))
                     continue
                 raise LLMError(f"cannot reach provider: {error.reason}") from error
+            except TimeoutError as error:
+                if attempt < max_retries:
+                    time.sleep(_backoff(attempt))
+                    continue
+                if self.timeout is None:
+                    raise LLMError("provider request timed out") from error
+                raise LLMError(
+                    f"provider request timed out after {self.timeout:g} seconds"
+                ) from error
 
         raise LLMError("retries exhausted")  # pragma: no cover - unreachable
 
@@ -271,4 +281,14 @@ def client_from_env(env: Optional[Dict[str, str]] = None) -> ChatClient:
     if missing:
         raise LLMConfigError("missing provider config: " + ", ".join(missing))
 
-    return ChatClient(base_url=base_url, api_key=api_key, model=model)
+    timeout_value = values.get("PIRL_REQUEST_TIMEOUT", "").strip()
+    timeout: Optional[float] = None
+    if timeout_value:
+        try:
+            timeout = float(timeout_value)
+        except ValueError as error:
+            raise LLMConfigError("PIRL_REQUEST_TIMEOUT must be a positive number") from error
+        if timeout <= 0:
+            raise LLMConfigError("PIRL_REQUEST_TIMEOUT must be a positive number")
+
+    return ChatClient(base_url=base_url, api_key=api_key, model=model, timeout=timeout)

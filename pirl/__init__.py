@@ -63,6 +63,19 @@ from .generate import (
     generator_from_client,
     parse_proposal_json,
 )
+from .execution import (
+    ApprovalExecutor,
+    AuditExecutor,
+    DirectExecutor,
+    DisabledExecutor,
+    ExecRequest,
+    ExecResult,
+    ExecutionInfo,
+    Executor,
+    ExecutorRegistry,
+    PolicyExecutor,
+    builtin_executor_registry,
+)
 from .tools import ExecutionPolicy, Tool, ToolRegistry, ToolResult, builtin_tools
 from .agent import Agent, FinishCalled, RunResult, StepStart, ToolCalled
 from .harness import HarnessResult, TaskHarness, TaskSpec
@@ -160,6 +173,17 @@ __all__ = [
     "Tool",
     "ToolRegistry",
     "ToolResult",
+    "ExecRequest",
+    "ExecResult",
+    "ExecutionInfo",
+    "Executor",
+    "ExecutorRegistry",
+    "DirectExecutor",
+    "DisabledExecutor",
+    "PolicyExecutor",
+    "ApprovalExecutor",
+    "AuditExecutor",
+    "builtin_executor_registry",
     "ExecutionPolicy",
     "builtin_tools",
     # Run memory + history + env

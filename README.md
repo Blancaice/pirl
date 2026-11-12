@@ -21,7 +21,7 @@ pirl/
 ├── loop.py          # B6: 自生成闭环 + 效用统计 + 定期退役
 ├── llm.py           # 零依赖 OpenAI 兼容 chat client(urllib)
 ├── generate.py      # 真实 generate_skill:模型输出 → Proposal(JSON 契约 + 解析 + 校验)
-├── tools.py         # 工作区受限的工具集(list/read/write/search/bash)+ ToolRegistry
+├── tools.py         # 工作区文件工具 + 结构化 exec/legacy bash + ToolRegistry
 ├── agent.py         # turn loop:section 化系统提示 + 工具执行 + trace + 结构化进度事件 + 自生成
 ├── run_memory.py    # 跨 run 记忆(追加 section,不碰 persona)
 ├── env.py           # 最小 .env 加载(不覆盖已 export 的变量,值按字面量)
@@ -45,7 +45,7 @@ tests/               # pytest 测试(192 个用例)
 - **LLM 重试**:429/5xx/超时指数退避 + 抖动,尊重 `Retry-After`。
 - **确定性验证**:`run --verify "python -m pytest"` 在任务后用退出码判定成败。
 - **token 统计**:跨步骤累加 `usage`(prompt/completion/total),结束打到 stderr。
-- **上下文压缩**:轨迹超预算时把旧 tool results 蒸馏成 `[COMPACTED]` 摘要(保留 decisions/failures/facts),system 前缀永不动。
+- **分层上下文压缩**:完整消息轨迹保留给 checkpoint/审计；每轮只派生模型输入。同一路径+内容哈希的重复读取只保留一份正文，大输出与旧写入正文按哈希外置到 `.pirl/objects/`，80% 高水位后才用 LLM 蒸馏旧轨迹(保留 decisions/constraints/failures/facts)，摘要连续失败则熔断并退回确定性有界尾部；system 前缀永不改写。
 - **交互审核**:`run` 生成候选后询问 `[a]ctivate/[r]eject/[s]kip`;另有 `review` / `reject` 命令。
 
 ## A 部分实现要点(照抄 pi)
@@ -166,16 +166,45 @@ export PIRL_BASE_URL=https://api.deepseek.com/v1
 export PIRL_API_KEY=...
 export PIRL_MODEL=deepseek-chat
 
+# Structured argv execution asks for approval by default. This changes only
+# process authorization; use a container when filesystem isolation is needed.
 python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo
 
-# bash is disabled by default; explicitly opt in when needed
+# Auto mode skips per-process approval (it is not a sandbox).
+python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo --approval auto
+
+# Disable process execution entirely. `direct` is the default host backend.
+python -m pirl run "review the implementation" --cwd /path/to/repo --executor none
+
+# Legacy shell execution remains disabled by default; explicitly opt in when needed.
 python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo --allow-bash
 
 默认不限制 step 数；使用总 token、运行时间、工具调用数、费用和停滞检测控制运行边界。需要兼容旧行为时仍可传 `--max-steps N`。
 
 # Optional Rust execution kernel (build rust-exec first):
 # export PIRL_EXECUTOR=/path/to/pirl-exec
+# python -m pirl run "fix tests" --executor rust --approval auto
 ```
+
+### 可插拔执行层
+
+模型始终调用同一个结构化工具：`exec({"argv": [...]})`。执行位置和外围控制由
+`Executor` 插件决定；内置 `direct` 直接使用宿主用户权限，`none` 禁止进程执行，
+设置 `PIRL_EXECUTOR` 后还可选择 `rust`。`PolicyExecutor`、`ApprovalExecutor` 和
+`AuditExecutor` 是可组合中间件。启动时会输出 backend、隔离声明、文件系统/网络
+边界和审批模式，这些信息也写入 run record。`direct` 明确不提供隔离。
+
+第三方包可以通过 Python entry point 注册执行器：
+
+```toml
+[project.entry-points."pirl.executors"]
+docker = "my_pirl_plugin:create_executor"
+```
+
+factory 接收已解析的 workspace `Path` 并返回实现 `Executor` 协议的对象。只有用户
+通过 `--executor docker` 显式选择时才加载该插件；pirl 本体不会自动导入所有已安装
+执行器。容器、VM、SSH 等后端因此可以放在外围实现，而无需修改 Agent loop 或工具
+协议。
 
 ```python
 from pirl import Agent, ChatClient, SelfGenLoop, SkillStore, ToolRegistry, builtin_tools, generator_from_client

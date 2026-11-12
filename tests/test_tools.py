@@ -1,6 +1,6 @@
 import json
 
-from pirl.tools import ExecutionPolicy, ToolRegistry, builtin_tools
+from pirl.tools import ExecRequest, ExecutionPolicy, ToolRegistry, builtin_tools
 
 
 def _registry(tmp_path):
@@ -65,6 +65,58 @@ def test_bash_can_be_disabled_by_host_policy(tmp_path):
     reg = ToolRegistry(tmp_path, builtin_tools(), policy=ExecutionPolicy(allow_bash=False))
     result = reg.execute("bash", {"command": "echo hello"})
     assert "disabled by policy" in result.error
+
+
+def test_exec_uses_structured_argv_without_shell(tmp_path):
+    reg = ToolRegistry(tmp_path, builtin_tools(), approval_mode="auto")
+    result = reg.execute("exec", {"argv": ["printf", "%s", "hello; not shell"]})
+    assert result.error == ""
+    assert result.content == "hello; not shell"
+
+
+def test_exec_requests_host_approval(tmp_path):
+    requests: list[ExecRequest] = []
+
+    def approve(request: ExecRequest) -> bool:
+        requests.append(request)
+        return True
+
+    reg = ToolRegistry(tmp_path, builtin_tools(), approver=approve)
+    result = reg.execute(
+        "exec",
+        {"argv": ["printf", "ok"], "reason": "verify output", "timeout_seconds": 5},
+    )
+    assert result.error == ""
+    assert requests == [ExecRequest(("printf", "ok"), tmp_path.resolve(), "verify output", 5)]
+
+
+def test_exec_rejected_without_approval(tmp_path):
+    reg = ToolRegistry(tmp_path, builtin_tools())
+    result = reg.execute("exec", {"argv": ["printf", "no"]})
+    assert "not approved" in result.error
+
+
+def test_exec_auto_skips_approver(tmp_path):
+    reg = ToolRegistry(
+        tmp_path,
+        builtin_tools(),
+        approval_mode="auto",
+        approver=lambda _request: (_ for _ in ()).throw(AssertionError("should not ask")),
+    )
+    result = reg.execute("exec", {"argv": ["printf", "ok"]})
+    assert result.error == ""
+
+
+def test_exec_never_mode_denies(tmp_path):
+    reg = ToolRegistry(tmp_path, builtin_tools(), approval_mode="never")
+    result = reg.execute("exec", {"argv": ["printf", "no"]})
+    assert "denied by approval policy" in result.error
+
+
+def test_exec_validates_argv_and_timeout(tmp_path):
+    reg = ToolRegistry(tmp_path, builtin_tools(), approval_mode="auto")
+    assert reg.execute("exec", {"argv": "printf ok"}).error
+    assert reg.execute("exec", {"argv": ["printf", "ok"], "timeout_seconds": 0}).error
 
 
 def test_apply_patch_is_workspace_scoped(tmp_path):

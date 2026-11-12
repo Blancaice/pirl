@@ -20,6 +20,7 @@ import json
 import re
 import shlex
 
+from .execution import ApprovalExecutor, DirectExecutor, ExecRequest, Executor, PolicyExecutor
 from .llm import ToolSpec
 from .run_history import RunStore
 
@@ -58,6 +59,7 @@ class ExecutionPolicy:
     """
 
     allow_bash: bool = True
+    allow_exec: bool = True
     deny_patterns: tuple[str, ...] = (
         r"\brm\s+(-[^\s]*f[^\s]*\s+)*-?r",
         r"\bgit\s+reset\s+--hard\b",
@@ -71,6 +73,18 @@ class ExecutionPolicy:
         for pattern in self.deny_patterns:
             if re.search(pattern, command, flags=re.IGNORECASE):
                 return f"bash command rejected by policy: {pattern}"
+        return ""
+
+    def check_exec(self, argv: Sequence[str]) -> str:
+        if not self.allow_exec:
+            return "process execution disabled by policy"
+        # Reuse the host's hard-deny rules for structured execution.  This is
+        # a policy gate, not filesystem isolation: child processes can still
+        # access anything available to the host user.
+        rendered = shlex.join(argv)
+        for pattern in self.deny_patterns:
+            if re.search(pattern, rendered, flags=re.IGNORECASE):
+                return f"exec argv rejected by policy: {pattern}"
         return ""
 
 
@@ -91,10 +105,27 @@ class Tool:
 class ToolRegistry:
     """Name -> Tool lookup; resolves paths against a fixed workspace."""
 
-    def __init__(self, workspace: str | Path, tools: Sequence[Tool] = (), *, policy: ExecutionPolicy | None = None, executor: Any | None = None) -> None:
+    def __init__(
+        self,
+        workspace: str | Path,
+        tools: Sequence[Tool] = (),
+        *,
+        policy: ExecutionPolicy | None = None,
+        executor: Executor | None = None,
+        approval_mode: str = "on-request",
+        approver: Callable[[ExecRequest], bool] | None = None,
+    ) -> None:
         self.workspace = Path(workspace).resolve()
         self.policy = policy or ExecutionPolicy()
-        self.executor = executor
+        if executor is None:
+            configured: Executor = DirectExecutor()
+            configured = ApprovalExecutor(configured, approval_mode, approver)
+            configured = PolicyExecutor(
+                configured, lambda request: self.policy.check_exec(request.argv)
+            )
+            self.executor = configured
+        else:
+            self.executor = executor
         self._tools: Dict[str, Tool] = {t.name: t for t in tools}
 
     def specs(self) -> List[ToolSpec]:
@@ -115,19 +146,38 @@ class ToolRegistry:
             reason = self.policy.check_bash(command)
             if reason:
                 return ToolResult("", reason)
-            if self.executor is not None:
-                try:
-                    argv = shlex.split(command)
-                    shell_tokens = (";", "&&", "||", "|", ">", "<", "`", "$(")
-                    if any(token in command for token in shell_tokens):
-                        return ToolResult("", "rust executor accepts argv only; shell syntax is rejected")
-                    result = self.executor.execute(argv)
-                    return ToolResult(result.get("stdout", "") + ("\n[stderr]\n" + result["stderr"] if result.get("stderr") else ""), "" if result.get("ok") else f"exit {result.get('code')}")
-                except Exception as exc:
-                    return ToolResult("", f"rust executor failed: {exc}")
-        if name == "apply_patch" and self.executor is not None:
+        if name == "exec":
+            argv = args.get("argv")
+            if (
+                not isinstance(argv, list)
+                or not argv
+                or any(not isinstance(item, str) or not item for item in argv)
+            ):
+                return ToolResult("", "argv must be a non-empty array of non-empty strings")
+            timeout = args.get("timeout_seconds", 60)
+            if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 600:
+                return ToolResult("", "timeout_seconds must be an integer between 1 and 600")
+            request = ExecRequest(
+                tuple(argv), self.workspace, str(args.get("reason", "")), timeout
+            )
             try:
-                result = self.executor.apply_patch(str(args.get("patch", "")))
+                result = self.executor.execute(request)
+            except Exception as exc:
+                return ToolResult("", f"executor failed: {exc}")
+            content = result.stdout
+            if result.stderr:
+                content += ("\n[stderr]\n" if content else "[stderr]\n") + result.stderr
+            if result.error and not content:
+                return ToolResult("", result.error)
+            error = "" if result.ok else result.error or f"exit {result.exit_code}"
+            display = content or f"(no output, exit {result.exit_code})"
+            return ToolResult(_truncate(display), error)
+        patch_executor = self.executor
+        while hasattr(patch_executor, "inner"):
+            patch_executor = patch_executor.inner
+        if name == "apply_patch" and hasattr(patch_executor, "apply_patch"):
+            try:
+                result = patch_executor.apply_patch(str(args.get("patch", "")))
                 return ToolResult("patch applied" if result.get("ok", True) else "", str(result.get("error", "")))
             except Exception as exc:
                 return ToolResult("", f"rust executor failed: {exc}")
@@ -416,6 +466,30 @@ def builtin_tools() -> List[Tool]:
             },
             _search,
             True,
+        ),
+        Tool(
+            "exec",
+            "Run one process from a structured argv array without a shell. Host approval may be required.",
+            {
+                "type": "object",
+                "properties": {
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "Executable followed by its arguments; no shell syntax",
+                    },
+                    "reason": {"type": "string", "description": "Why this process is needed"},
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 600,
+                        "description": "Process timeout, default 60 seconds",
+                    },
+                },
+                "required": ["argv"],
+            },
+            lambda _args, _workspace: ToolResult("", "exec must be dispatched by ToolRegistry"),
         ),
         Tool(
             "bash",

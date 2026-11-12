@@ -11,8 +11,19 @@ import subprocess
 from pathlib import Path
 from typing import Any, Iterable
 
+from .execution import ExecRequest, ExecResult, ExecutionInfo
+
 
 class RustExecutor:
+    # The current helper constrains argv/resources and requests a private
+    # network namespace, but it does not provide a filesystem sandbox.
+    info = ExecutionInfo(
+        "rust",
+        "process limits",
+        "host user",
+        "private namespace requested",
+    )
+
     def __init__(self, binary: str | Path, workspace: str | Path, *, timeout: float = 120.0):
         self.binary = str(binary)
         self.workspace = str(Path(workspace).expanduser().resolve())
@@ -34,8 +45,23 @@ class RustExecutor:
             raise RuntimeError(str(result["error"]))
         return result
 
-    def execute(self, argv: Iterable[str], *, limits: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.request("exec", argv=list(argv), limits=limits or {})
+    def execute(self, request: ExecRequest) -> ExecResult:
+        limits = {
+            "timeout_ms": request.timeout_seconds * 1000,
+            "max_output_bytes": 20_000,
+            "max_memory_bytes": None,
+            "max_cpu_seconds": None,
+            "network": False,
+        }
+        result = self.request("exec", argv=list(request.argv), limits=limits)
+        return ExecResult(
+            result.get("code"),
+            result.get("stdout", ""),
+            result.get("stderr", ""),
+            bool(result.get("timed_out")),
+            error="" if result.get("ok") else f"exit {result.get('code')}",
+            execution_scope="rust",
+        )
 
     def apply_patch(self, patch: str) -> dict[str, Any]:
         return self.request("patch", patch=patch)
