@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Mapping, Optional, Sequence
 
 from .frontmatter import strip_frontmatter
-from .skills import Skill
+from .plugins.skills import Skill
 
 
 def _lookup_skill(skills: Sequence[Skill], name: str) -> Optional[Skill]:

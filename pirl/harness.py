@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .git_snapshot import snapshot
+from .plugins.git_safety import snapshot
 from .run_history import RunRecord, RunStore, new_run_id, now_iso
-from .run_memory import write_memory
+from .plugins.memory import write_memory
 
 
 @dataclass(frozen=True)
@@ -17,12 +17,12 @@ class TaskSpec:
 
     task: str
     workspace: Path
-    max_steps: int = 20
+    max_steps: int | None = None
     verify: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_values(cls, task: str, workspace: str | Path, *, max_steps: int = 20,
+    def from_values(cls, task: str, workspace: str | Path, *, max_steps: int | None = None,
                     verify: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None):
         return cls(task, Path(workspace).expanduser().resolve(), max_steps, verify, dict(metadata or {}))
 
@@ -48,7 +48,12 @@ class TaskHarness:
         run_id = new_run_id()
         started_at = now_iso()
         git = snapshot(self.workspace)
-        result = agent.run(spec.task)
+        try:
+            result = agent.run(spec.task, run_id=run_id)
+        except TypeError as exc:
+            if "run_id" not in str(exc):
+                raise
+            result = agent.run(spec.task)
         write_memory(self.workspace, result.outcome, result.answer or result.message)
         record = RunRecord(
             run_id=run_id,

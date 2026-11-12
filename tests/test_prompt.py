@@ -1,5 +1,5 @@
 from pirl.prompt import PromptSection, format_skills_for_prompt, render_sections
-from pirl.skills import Skill
+from pirl.plugins.skills import Skill
 
 
 def test_render_sections_joins_and_drops_empty():

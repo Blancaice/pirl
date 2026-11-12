@@ -1,4 +1,4 @@
-from pirl.run_memory import memory_path, read_memory, write_memory
+from pirl.plugins.memory import memory_path, read_memory, write_memory
 
 
 def test_read_missing_returns_empty(tmp_path):

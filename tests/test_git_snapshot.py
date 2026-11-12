@@ -1,6 +1,6 @@
 import subprocess
 
-from pirl.git_snapshot import is_git, restore, snapshot
+from pirl.plugins.git_safety import is_git, restore, snapshot
 
 
 def _init_git(tmp_path):

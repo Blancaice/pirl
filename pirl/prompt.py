@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Literal
 
-from .skills import Skill
+from .plugins.skills import Skill
 
 @dataclass(frozen=True)
 class PromptSection:

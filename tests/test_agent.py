@@ -3,7 +3,7 @@ import json
 from pirl.agent import Agent, RunResult, StepStart, ToolCalled
 from pirl.llm import Completion, ToolCall, Usage
 from pirl.proposal import ToolCall as TraceCall
-from pirl.skills import Skill
+from pirl.plugins.skills import Skill
 from pirl.tools import ToolRegistry, builtin_tools
 
 

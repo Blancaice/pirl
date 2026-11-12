@@ -30,7 +30,7 @@ def make_proposal(name="upper", script=None, tests=None):
 
 
 def test_should_propose_on_failure():
-    assert should_propose([], "failure") is True
+    assert should_propose([], "failure") is False
 
 
 def test_should_propose_on_repeated_pattern():

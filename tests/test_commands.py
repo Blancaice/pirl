@@ -1,5 +1,5 @@
 from pirl.commands import expand_skill_command
-from pirl.skills import Skill
+from pirl.plugins.skills import Skill
 
 from tests.conftest import write_skill
 

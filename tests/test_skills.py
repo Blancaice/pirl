@@ -2,7 +2,7 @@ import textwrap
 
 import pytest
 
-from pirl.skills import (
+from pirl.plugins.skills import (
     discover_skills,
     load_skill_from_file,
     load_skills,

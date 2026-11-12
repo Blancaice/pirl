@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from .skills import CONFIG_DIR_NAME
+from .plugins.skills import CONFIG_DIR_NAME
 
 STATUS_DRAFT = "draft"
 STATUS_CANDIDATE = "candidate"
@@ -423,6 +423,6 @@ class SkillStore:
 
     def load_active_skills(self):
         """Discover active skills using Part A's loader (for ``<available_skills>``)."""
-        from .skills import discover_skills
+        from .plugins.skills import discover_skills
 
         return discover_skills(self.active_dir, "path")

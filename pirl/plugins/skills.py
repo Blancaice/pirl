@@ -21,8 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
-from .frontmatter import parse_frontmatter
-from .ignore import IgnoreMatcher
+from ..frontmatter import parse_frontmatter
+from ..ignore import IgnoreMatcher
 
 # --------------------------------------------------------------------------- #
 # Constants

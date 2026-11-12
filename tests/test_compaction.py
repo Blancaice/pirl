@@ -1,7 +1,7 @@
 import json
 
 from pirl.agent import Agent
-from pirl.compaction import (
+from pirl.plugins.compaction import (
     compact,
     estimate_messages_tokens,
     estimate_tokens,

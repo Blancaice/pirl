@@ -20,7 +20,7 @@ Public API::
 
 from .frontmatter import parse_frontmatter, strip_frontmatter
 from .prompt import PromptSection, format_skills_for_prompt, render_sections
-from .skills import (
+from .plugins.skills import (
     Diagnostic,
     LoadSkillsResult,
     Skill,
@@ -45,7 +45,7 @@ from .proposal import (
     should_propose,
     verify,
 )
-from .loop import LoopResult, SelfGenLoop
+from .plugins.self_generation import LoopResult, SelfGenLoop
 from .llm import (
     ChatClient,
     Completion,
@@ -75,10 +75,10 @@ from .protocols import (
     ToolProvider,
     Verifier,
 )
-from .run_memory import memory_path, read_memory, write_memory
+from .plugins.memory import memory_path, read_memory, write_memory
 from .run_history import RunRecord, RunStore
-from .git_snapshot import GitSnapshot, is_git, restore, snapshot
-from .compaction import (
+from .plugins.git_safety import GitSnapshot, is_git, restore, snapshot
+from .plugins.compaction import (
     compact,
     default_summarizer,
     estimate_messages_tokens,
@@ -88,7 +88,7 @@ from .env import load_dotenv
 from .context import ContextManager
 from .verification import CommandVerifier
 from .checkpoint import CheckpointStore
-from .hooks import SelfGenerationHook, SkillUsageHook
+from .plugins.hooks import SelfGenerationHook, SkillUsageHook
 from .rust_exec import RustExecutor, executor_from_env
 from . import ui
 

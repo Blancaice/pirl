@@ -17,7 +17,7 @@ import re
 from typing import Any, Dict, List, Sequence
 
 from .llm import ChatClient
-from .loop import SkillGenerator
+from .plugins.self_generation import SkillGenerator
 from .proposal import CaseSpec, Proposal
 
 PROPOSAL_CONTRACT = (

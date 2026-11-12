@@ -23,8 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
-from .lifecycle import SkillRecord, SkillStore
-from .proposal import (
+from ..lifecycle import SkillRecord, SkillStore
+from ..proposal import (
     Proposal,
     VerificationResult,
     should_propose,
@@ -71,7 +71,7 @@ class SelfGenLoop:
         user_requested: bool = False,
     ) -> LoopResult:
         """Called at the end of a run. Proposes and verifies a skill if warranted."""
-        if not should_propose(
+        if proposal is None and not should_propose(
             trace, outcome, user_requested=user_requested, n=self.n_repeat
         ):
             return LoopResult(False, "skipped", message="no trigger fired")

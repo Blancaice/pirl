@@ -171,6 +171,8 @@ python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo
 # bash is disabled by default; explicitly opt in when needed
 python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo --allow-bash
 
+默认不限制 step 数；使用总 token、运行时间、工具调用数、费用和停滞检测控制运行边界。需要兼容旧行为时仍可传 `--max-steps N`。
+
 # Optional Rust execution kernel (build rust-exec first):
 # export PIRL_EXECUTOR=/path/to/pirl-exec
 ```

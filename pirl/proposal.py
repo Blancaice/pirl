@@ -77,11 +77,10 @@ def should_propose(
     n: int = 3,
 ) -> bool:
     """B3: decide whether to propose a new skill for this run."""
-    return (
-        outcome == OUTCOME_FAILURE
-        or repeated_tool_pattern(trace, n)
-        or user_requested
-    )
+    # Failure learning is owned by SkillLearningPlugin, which requires a
+    # persistent repeated failure signature. This helper only handles explicit
+    # extraction and repeated tool patterns.
+    return repeated_tool_pattern(trace, n) or user_requested
 
 
 # --------------------------------------------------------------------------- #

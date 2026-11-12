@@ -1,7 +1,7 @@
 import pytest
 
 from pirl.lifecycle import STATUS_ACTIVE, STATUS_CANDIDATE, STATUS_DRAFT, SkillStore
-from pirl.loop import SelfGenLoop
+from pirl.plugins.self_generation import SelfGenLoop
 from pirl.proposal import CaseSpec, Proposal, ToolCall
 
 
@@ -39,7 +39,7 @@ def test_clean_success_skips_proposal(store):
 
 def test_failed_run_produces_candidate(store):
     loop = SelfGenLoop(store, generator=lambda t, o: make_proposal())
-    result = loop.on_run_end([], "failure")
+    result = loop.on_run_end([], "success", user_requested=True)
 
     assert result.proposed is True
     assert result.status == "candidate"
@@ -57,7 +57,7 @@ def test_fake_skill_is_rejected_before_candidate(store):
         tests=[CaseSpec("hello\n", "HELLO\n")],
     )
     loop = SelfGenLoop(store, generator=lambda t, o: fake)
-    result = loop.on_run_end([], "failure")
+    result = loop.on_run_end([], "success", proposal=fake)
 
     assert result.status == "rejected"
     assert not (store.candidate_dir / "fake").exists()  # 验证失败不进入候选
@@ -68,14 +68,14 @@ def test_fake_skill_is_rejected_before_candidate(store):
 
 def test_trigger_without_generator_is_error(store):
     loop = SelfGenLoop(store)  # no generator
-    result = loop.on_run_end([], "failure")
+    result = loop.on_run_end([], "success", user_requested=True)
     assert result.status == "error"
 
 
 def test_explicit_proposal_bypasses_generator(store):
     loop = SelfGenLoop(store)
     result = loop.on_run_end(
-        [], "failure", proposal=make_proposal()
+        [], "success", proposal=make_proposal()
     )
     assert result.status == "candidate"
     assert store.get("upper").status == STATUS_CANDIDATE
@@ -83,7 +83,7 @@ def test_explicit_proposal_bypasses_generator(store):
 
 def test_full_cycle_to_active(store):
     loop = SelfGenLoop(store, generator=lambda t, o: make_proposal())
-    result = loop.on_run_end([], "failure")
+    result = loop.on_run_end([], "success", user_requested=True)
     assert result.status == "candidate"
 
     record = loop.activate("upper", reviewer="blanca", reason="approved")
@@ -99,7 +99,7 @@ def test_full_cycle_to_active(store):
 
 def test_retrieve_and_adopt_flow(store):
     loop = SelfGenLoop(store, generator=lambda t, o: make_proposal())
-    loop.on_run_end([], "failure")
+    loop.on_run_end([], "success", user_requested=True)
     loop.activate("upper", reviewer="blanca", reason="ok")
 
     loop.on_retrieve("upper")

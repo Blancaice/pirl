@@ -11,24 +11,27 @@ retirement actually work.
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import shlex
 import subprocess
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
-from .compaction import compact, default_summarizer, estimate_messages_tokens
+from .plugins.compaction import compact, default_summarizer, estimate_messages_tokens
 from .lifecycle import SkillStore
 from .llm import ChatClient, ToolSpec, Usage
-from .loop import LoopResult, SelfGenLoop
+from .plugins.self_generation import LoopResult, SelfGenLoop
 from .prompt import PromptSection, format_skills_for_prompt, render_sections
 from .protocols import CheckpointWriter, EventSink, ModelProvider, PromptBuilder, ToolProvider, Verifier
 from .proposal import ToolCall
-from .skills import Skill
+from .plugins.skills import Skill
 from .tools import ToolRegistry, ToolResult
-from .hooks import SelfGenerationHook, SkillUsageHook
+from .plugins.hooks import SelfGenerationHook, SkillUsageHook
 
 BASE_SYSTEM = (
     "You are a coding agent working in a local workspace. "
@@ -72,7 +75,7 @@ ADOPT_SKILL_SPEC = ToolSpec(
     },
 )
 
-MAX_STEPS = 20
+MAX_STEPS: int | None = None
 
 
 @dataclass(frozen=True)
@@ -80,7 +83,7 @@ class StepStart:
     """The loop is about to make a model request."""
 
     step: int
-    max_steps: int
+    max_steps: int | None
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,7 @@ class RunResult:
     usage: Usage = field(default_factory=Usage)  # total tokens across all steps
     loop_result: Optional[LoopResult] = None
     message: str = ""
+    verification_failed: bool = False
 
 
 def _parse_args(raw: str):
@@ -140,7 +144,15 @@ class Agent:
         system_prompt: str = "",
         memory: str = "",
         prompt_builder: PromptBuilder | None = None,
-        max_steps: int = MAX_STEPS,
+        max_steps: int | None = MAX_STEPS,
+        max_total_tokens: int | None = None,
+        max_runtime_seconds: float | None = None,
+        max_tool_calls: int | None = None,
+        max_cost_usd: float | None = None,
+        input_cost_per_1k: float | None = None,
+        output_cost_per_1k: float | None = None,
+        repeat_limit: int = 3,
+        no_progress_limit: int = 3,
         verify_command: str | None = None,
         context_budget: int | None = 16000,
         keep_recent: int = 6,
@@ -164,6 +176,14 @@ class Agent:
         self.memory = memory
         self.prompt_builder = prompt_builder
         self.max_steps = max_steps
+        self.max_total_tokens = max_total_tokens
+        self.max_runtime_seconds = max_runtime_seconds
+        self.max_tool_calls = max_tool_calls
+        self.max_cost_usd = max_cost_usd
+        self.input_cost_per_1k = input_cost_per_1k
+        self.output_cost_per_1k = output_cost_per_1k
+        self.repeat_limit = max(2, repeat_limit)
+        self.no_progress_limit = max(1, no_progress_limit)
         self.verify_command = verify_command
         self.context_budget = context_budget
         self.keep_recent = keep_recent
@@ -275,7 +295,39 @@ class Agent:
         parts = rel.parts
         return parts[0] if parts else None
 
-    def run(self, user_message: str, *, resume_state: Dict[str, Any] | None = None) -> RunResult:
+    def _workspace_fingerprint(self) -> str:
+        """Cheap deterministic fingerprint for detecting file-state progress."""
+        workspace = getattr(self.tools, "workspace", None) if self.tools is not None else None
+        if workspace is None:
+            return ""
+        root = Path(workspace)
+        digest = hashlib.sha256()
+        try:
+            for path in sorted(root.rglob("*")):
+                if not path.is_file() or any(part in {".git", ".pirl", "__pycache__", ".pytest_cache"} for part in path.parts):
+                    continue
+                stat = path.stat()
+                digest.update(str(path.relative_to(root)).encode())
+                digest.update(f":{stat.st_size}:{stat.st_mtime_ns}".encode())
+        except OSError:
+            return "<unavailable>"
+        return digest.hexdigest()
+
+    def _budget_failure(self, started: float, tool_calls: int) -> str | None:
+        if self.max_runtime_seconds is not None and time.monotonic() - started >= self.max_runtime_seconds:
+            return f"max runtime exceeded ({self.max_runtime_seconds:g}s)"
+        if self.max_total_tokens is not None and self._usage.total_tokens >= self.max_total_tokens:
+            return f"max total tokens exceeded ({self.max_total_tokens})"
+        if self.max_tool_calls is not None and tool_calls >= self.max_tool_calls:
+            return f"max tool calls exceeded ({self.max_tool_calls})"
+        if self.max_cost_usd is not None and self.input_cost_per_1k is not None and self.output_cost_per_1k is not None:
+            cost = (self._usage.prompt_tokens / 1000) * self.input_cost_per_1k + (self._usage.completion_tokens / 1000) * self.output_cost_per_1k
+            if cost >= self.max_cost_usd:
+                return f"max cost exceeded (${self.max_cost_usd:.4f})"
+        return None
+
+    def run(self, user_message: str, *, resume_state: Dict[str, Any] | None = None, run_id: str = "") -> RunResult:
+        self._current_run_id = run_id
         self._retrieved.clear()
         self._applied.clear()
         self._reasoning_log.clear()
@@ -296,10 +348,21 @@ class Agent:
             ]
             trace = []
         tool_specs = self._tool_specs()
-
-        for step in range(1, self.max_steps + 1):
+        started = time.monotonic()
+        tool_calls = 0
+        repeat_count = 0
+        last_call_signature = ""
+        stagnant_steps = 0
+        step = 0
+        verification_failed = False
+        while self.max_steps is None or step < self.max_steps:
+            step += 1
+            budget_error = self._budget_failure(started, tool_calls)
+            if budget_error is not None:
+                return self._close(trace, "failure", "", budget_error)
             if self.cancel_event is not None and self.cancel_event.is_set():
                 return self._close(trace, "failure", "", "cancelled")
+            progress_before = self._workspace_fingerprint()
             if self.context_manager is not None:
                 messages = self.context_manager.maybe_compact(messages, user_message)
             elif self.context_budget and estimate_messages_tokens(messages) > self.context_budget:
@@ -319,6 +382,7 @@ class Agent:
                     self._emit(ToolCalled("verify", self.verify_command))
                     passed, output = self._verify(self.verify_command)
                     if not passed:
+                        verification_failed = True
                         messages.append(
                             {"role": "assistant", "content": completion.text}
                         )
@@ -328,6 +392,10 @@ class Agent:
                                 "content": f"verification failed:\n{output}",
                             }
                         )
+                        if self.max_steps is None and progress_before == self._workspace_fingerprint():
+                            stagnant_steps += 1
+                            if stagnant_steps >= self.no_progress_limit:
+                                return self._close(trace, "failure", "", "no file or test progress", verification_failed)
                         continue
                 return self._close(trace, "success", completion.text)
 
@@ -371,6 +439,18 @@ class Agent:
                 executed = [execute_one(item) for item in ordinary]
 
             for tc, call_id in pending:
+                tool_calls += 1
+                call_signature = f"{tc.name}:{tc.arguments}"
+                if call_signature == last_call_signature:
+                    repeat_count += 1
+                else:
+                    repeat_count = 1
+                    last_call_signature = call_signature
+                if self.max_steps is None and repeat_count >= self.repeat_limit:
+                    return self._close(trace, "failure", "", "repeated tool call detected")
+                budget_error = self._budget_failure(started, tool_calls)
+                if budget_error is not None:
+                    return self._close(trace, "failure", "", budget_error)
                 if tc.name == FINISH_NAME:
                     self._emit(FinishCalled(tc.arguments))
                     args = _parse_args(tc.arguments)
@@ -384,6 +464,7 @@ class Agent:
                         self._emit(ToolCalled("verify", self.verify_command))
                         passed, output = self._verify(self.verify_command)
                         if not passed:
+                            verification_failed = True
                             messages.append(
                                 {
                                     "role": "tool",
@@ -393,7 +474,7 @@ class Agent:
                             )
                             continue  # reject the completion; let the model fix it
                     return self._close(
-                        trace, "success" if success else "failure", summary
+                        trace, "success" if success else "failure", summary, "", verification_failed
                     )
 
                 if tc.name == "adopt_skill":
@@ -434,17 +515,27 @@ class Agent:
 
             if self.checkpoint is not None:
                 self.checkpoint({"schema_version": 1, "step": step, "messages": messages, "trace": [t.__dict__ for t in trace]})
+            if self.max_steps is None and progress_before == self._workspace_fingerprint() and ordinary:
+                stagnant_steps += 1
+                if stagnant_steps >= self.no_progress_limit:
+                    return self._close(trace, "failure", "", "no file or test progress")
+            else:
+                stagnant_steps = 0
 
         return self._close(trace, "failure", "", "max steps exceeded")
 
     def _close(
-        self, trace: List[ToolCall], outcome: str, answer: str, message: str = ""
+        self, trace: List[ToolCall], outcome: str, answer: str, message: str = "",
+        verification_failed: bool = False,
     ) -> RunResult:
         for hook in self.hooks:
             callback = getattr(hook, "on_run_end", None)
             if callback is not None:
-                callback(trace=trace, outcome=outcome, applied=set(self._applied))
+                callback(trace=trace, outcome=outcome, message=message,
+                         verification_failed=verification_failed,
+                         run_id=getattr(self, "_current_run_id", ""), applied=set(self._applied))
         loop_result = self._self_gen_hook.result if self._self_gen_hook is not None else None
         return RunResult(
-            answer, outcome, trace, list(self._reasoning_log), self._usage, loop_result, message
+            answer, outcome, trace, list(self._reasoning_log), self._usage, loop_result,
+            message, verification_failed
         )

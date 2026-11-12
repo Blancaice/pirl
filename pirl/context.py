@@ -1,7 +1,7 @@
 """Injectable context management for the agent runner."""
 from __future__ import annotations
 from typing import Any, Callable, Dict, List
-from .compaction import compact, estimate_messages_tokens
+from .plugins.compaction import compact, estimate_messages_tokens
 
 class ContextManager:
     def __init__(self, summarize: Callable[[str], str], budget: int | None = 16000, keep_recent: int = 6):
