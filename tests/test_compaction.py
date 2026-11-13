@@ -141,7 +141,8 @@ def _tool_exchange(call_id, name, args, content):
     ]
 
 
-def test_context_deduplicates_unchanged_file_without_mutating_journal(tmp_path):
+def test_repeated_reads_are_sent_verbatim_by_default(tmp_path):
+    """Collapsing an older message moves the prefix; stability wins by default."""
     result = json.dumps({"ok": True, "content": "same source", "error": "", "source": "tool:read_file"})
     messages = [_msg("system", "s"), _msg("user", "task")]
     messages += _tool_exchange("c1", "read_file", {"path": "calc.py"}, result)
@@ -149,6 +150,23 @@ def test_context_deduplicates_unchanged_file_without_mutating_journal(tmp_path):
     original = json.loads(json.dumps(messages))
 
     manager = ContextManager(lambda _: "unused", None, object_dir=tmp_path / "objects")
+    wire = manager.prepare(messages, "task")
+
+    assert messages == original
+    assert wire[3]["content"] == result
+    assert wire[5]["content"] == result
+
+
+def test_dedupe_is_opt_in_and_never_mutates_the_journal(tmp_path):
+    result = json.dumps({"ok": True, "content": "same source", "error": "", "source": "tool:read_file"})
+    messages = [_msg("system", "s"), _msg("user", "task")]
+    messages += _tool_exchange("c1", "read_file", {"path": "calc.py"}, result)
+    messages += _tool_exchange("c2", "read_file", {"path": "calc.py"}, result)
+    original = json.loads(json.dumps(messages))
+
+    manager = ContextManager(
+        lambda _: "unused", None, object_dir=tmp_path / "objects", dedupe=True
+    )
     wire = manager.prepare(messages, "task")
 
     assert messages == original
@@ -185,18 +203,31 @@ def test_context_externalizes_large_result_with_preview(tmp_path):
     assert any(path.read_text() == body for path in tmp_path.glob("*.txt"))
 
 
-def test_context_deduplicates_identical_command_output_without_skipping_execution(tmp_path):
+def test_identical_command_output_is_kept_when_dedupe_is_off(tmp_path):
     messages = [_msg("system", "s"), _msg("user", "task")]
     messages += _tool_exchange("c1", "exec", {"argv": ["pytest", "-q"]}, "4 passed")
     messages += _tool_exchange("c2", "exec", {"argv": ["pytest", "-q"]}, "4 passed")
 
     wire = ContextManager(lambda _: "unused", None, object_dir=tmp_path).prepare(messages, "task")
 
-    assert wire[3]["content"].startswith("[COMPRESSED]")
+    assert wire[3]["content"] == "4 passed"
     assert wire[5]["content"] == "4 passed"
     # Both calls stay in the protocol; this is context caching, not unsafe
     # reuse of a potentially stale command result.
     assert sum(len(m.get("tool_calls", [])) for m in wire) == 2
+
+
+def test_identical_command_output_can_be_deduped_explicitly(tmp_path):
+    messages = [_msg("system", "s"), _msg("user", "task")]
+    messages += _tool_exchange("c1", "exec", {"argv": ["pytest", "-q"]}, "4 passed")
+    messages += _tool_exchange("c2", "exec", {"argv": ["pytest", "-q"]}, "4 passed")
+
+    wire = ContextManager(
+        lambda _: "unused", None, object_dir=tmp_path, dedupe=True
+    ).prepare(messages, "task")
+
+    assert wire[3]["content"].startswith("[COMPRESSED]")
+    assert wire[5]["content"] == "4 passed"
 
 
 def test_context_archives_old_write_body(tmp_path):
@@ -255,7 +286,7 @@ def test_context_uses_llm_summary_only_above_high_water():
 
 
 def test_agent_checkpoint_keeps_full_journal_while_wire_is_reduced(tmp_path):
-    (tmp_path / "a.txt").write_text("same")
+    (tmp_path / "a.txt").write_text("same " * 2000)
     checkpoints = []
     from tests.test_agent import _ScriptedClient
     client = _ScriptedClient([
@@ -273,6 +304,6 @@ def test_agent_checkpoint_keeps_full_journal_while_wire_is_reduced(tmp_path):
     assert agent.run("read twice").outcome == "success"
     full_results = [m for m in checkpoints[-1]["messages"] if m["role"] == "tool"]
     wire_results = [m for m in client.calls[-1][0] if m["role"] == "tool"]
-    assert all(not m["content"].startswith("[COMPRESSED]") for m in full_results)
-    assert wire_results[0]["content"].startswith("[COMPRESSED]")
-    assert not wire_results[1]["content"].startswith("[COMPRESSED]")
+    # The journal keeps the full text; the wire carries a hash-backed preview.
+    assert all(len(m["content"]) > 4000 for m in full_results)
+    assert all(m["content"].startswith("[COMPRESSED]") for m in wire_results)

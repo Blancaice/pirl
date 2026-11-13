@@ -29,6 +29,11 @@ from .prompt import format_skills_for_prompt
 from .proposal import Proposal, verify
 from .plugins.skills import Skill, discover_skills
 
+# TEMPORARY runtime guard: cap a single run at 20 model steps.
+# Override with ``--max-steps N``; ``--max-steps 0`` disables the cap entirely.
+# Remove when per-run step budgeting lands.
+TEMP_MAX_STEPS = 20
+
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pirl", description="Skill system")
@@ -83,7 +88,15 @@ def _build_parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run", help="run one task in a workspace")
     run.add_argument("task")
     run.add_argument("--cwd", default=".")
-    run.add_argument("--max-steps", type=int, default=None, help="deprecated optional hard step cap")
+    run.add_argument(
+        "--max-steps",
+        type=int,
+        default=TEMP_MAX_STEPS,
+        help=(
+            f"hard cap on model steps per run (temporary default: {TEMP_MAX_STEPS}); "
+            "0 disables the cap"
+        ),
+    )
     run.add_argument("--max-total-tokens", type=int, default=None)
     run.add_argument("--max-runtime-seconds", type=float, default=None)
     run.add_argument("--max-tool-calls", type=int, default=None)
@@ -91,9 +104,17 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--input-cost-per-1k", type=float, default=None)
     run.add_argument("--output-cost-per-1k", type=float, default=None)
     run.add_argument(
+        "--no-bash",
+        action="store_true",
+        help=(
+            "disable shell execution entirely; this is the only execution tool, "
+            "so nothing can run without it"
+        ),
+    )
+    run.add_argument(
         "--allow-bash",
         action="store_true",
-        help="enable shell execution (unsafe; bash is not an OS-level sandbox)",
+        help="deprecated no-op: bash is the only execution tool and is enabled by default",
     )
     run.add_argument(
         "--executor",
@@ -113,6 +134,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "--verify",
         default=None,
         help="command to deterministically verify a finish(success=true)",
+    )
+    run.add_argument(
+        "--session",
+        default=None,
+        help="resume an existing session JSONL instead of starting a new one",
+    )
+    run.add_argument(
+        "--context-window",
+        type=int,
+        default=None,
+        help="model context window in tokens (enables reserve-based compaction)",
+    )
+    run.add_argument(
+        "--keep-recent-tokens",
+        type=int,
+        default=None,
+        help="tokens to keep verbatim when compacting (default: 20000)",
+    )
+    run.add_argument(
+        "--summarizer-model",
+        default=None,
+        help="separate (cheaper/faster) model for compaction summaries",
+    )
+    run.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="disable incremental streaming of model output",
     )
 
     restore_cmd = sub.add_parser(
@@ -285,12 +333,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from .generate import generator_from_client
     from .harness import TaskHarness, TaskSpec
     from .lifecycle import SkillStore
-    from .llm import LLMConfigError, LLMError, client_from_env
+    from .llm import ChatClient, LLMConfigError, LLMError, client_from_env
     from .plugins.self_generation import SelfGenLoop
     from .plugins.skill_learning import FailureCandidateStore, SkillLearningPlugin
     from .plugins.memory import read_memory
     from .plugins.skills import discover_skills
     from .execution import ApprovalExecutor, PolicyExecutor, builtin_executor_registry
+    from .session import SessionManager, default_session_path
     from .tools import ExecutionPolicy, ToolRegistry, builtin_tools
     from .rust_exec import RustExecutor
 
@@ -327,9 +376,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
             skills.append(skill)
             active_names.add(skill.name)
 
-    execution_policy = ExecutionPolicy(
-        allow_bash=args.allow_bash or bool(os.environ.get("PIRL_EXECUTOR"))
-    )
+    # One execution tool (bash), enabled by default like pi/dsh. The old
+    # ``--allow-bash`` opt-in is kept as an accepted no-op.
+    execution_policy = ExecutionPolicy(allow_bash=not args.no_bash)
     executors = builtin_executor_registry()
     rust_binary = os.environ.get("PIRL_EXECUTOR", "").strip()
     if rust_binary:
@@ -384,6 +433,62 @@ def _cmd_run(args: argparse.Namespace) -> int:
             [], "success", proposal=proposal, user_requested=True
         ),
     )
+    session_path = (
+        Path(args.session).expanduser().resolve()
+        if getattr(args, "session", None)
+        else default_session_path(workspace)
+    )
+    if session_path.exists():
+        session = SessionManager.open(
+            session_path,
+            cwd=workspace,
+            model=str(getattr(client, "model", "") or ""),
+            provider=str(getattr(client, "base_url", "") or ""),
+        )
+    else:
+        session = SessionManager.create(
+            session_path,
+            cwd=workspace,
+            model=str(getattr(client, "model", "") or ""),
+            provider=str(getattr(client, "base_url", "") or ""),
+        )
+    window = args.context_window or int(os.environ.get("PIRL_CONTEXT_WINDOW", "0") or 0) or None
+    keep_recent_tokens = (
+        args.keep_recent_tokens
+        or int(os.environ.get("PIRL_KEEP_RECENT_TOKENS", "0") or 0)
+        or None
+    )
+    summarizer_model = (
+        args.summarizer_model or os.environ.get("PIRL_SUMMARIZER_MODEL", "").strip() or None
+    )
+    summarizer_client = (
+        ChatClient(
+            base_url=client.base_url,
+            api_key=client.api_key,
+            model=summarizer_model,
+            timeout=client.timeout,
+        )
+        if summarizer_model
+        else None
+    )
+    stream_enabled = not args.no_stream
+
+    def emit_text(chunk: str) -> None:
+        if chunk:
+            streamed_text.append(chunk)
+            print(chunk, end="", flush=True)
+
+    def emit_reasoning(chunk: str) -> None:
+        if chunk:
+            print(chunk, end="", file=sys.stderr, flush=True)
+
+    streamed_text: list[str] = []
+
+    # Temporary per-run guard: None means unlimited (``--max-steps 0``).
+    max_steps = None if not args.max_steps or args.max_steps <= 0 else int(args.max_steps)
+    if max_steps is not None:
+        print(f"[limit] max {max_steps} steps per run", file=sys.stderr)
+
     agent = Agent(
         client,
         skills=skills,
@@ -391,7 +496,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         self_gen=learning,
         skill_store=store,
         memory=read_memory(workspace),
-        max_steps=args.max_steps,
+        session=session,
+        max_steps=max_steps,
         verify_command=args.verify,
         max_total_tokens=args.max_total_tokens,
         max_runtime_seconds=args.max_runtime_seconds,
@@ -399,10 +505,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
         max_cost_usd=args.max_cost_usd,
         input_cost_per_1k=args.input_cost_per_1k,
         output_cost_per_1k=args.output_cost_per_1k,
+        context_window=window,
+        keep_recent_tokens=keep_recent_tokens,
+        summarizer_client=summarizer_client,
+        stream=stream_enabled,
+        on_text=emit_text if stream_enabled else None,
+        on_reasoning=emit_reasoning if stream_enabled else None,
         on_step=lambda event: print(render_step(event), file=sys.stderr, flush=True),
     )
     harness = TaskHarness(workspace)
-    spec = TaskSpec.from_values(args.task, workspace, max_steps=args.max_steps, verify=args.verify)
+    spec = TaskSpec.from_values(args.task, workspace, max_steps=max_steps, verify=args.verify)
     try:
         run = harness.run(agent, spec)
         result = run.result
@@ -410,15 +522,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"pirl: {error}", file=sys.stderr)
         return 1
 
-    for step, block in enumerate(result.reasoning, 1):
-        print(f"--- thinking (step {step}) ---", file=sys.stderr)
-        print(block, file=sys.stderr)
-    print(result.answer or f"[{result.outcome}] {result.message}", flush=True)
+    # Reasoning was rendered live while streaming; only replay it when the run
+    # did not stream (so nothing is printed twice).
+    if not stream_enabled:
+        for step, block in enumerate(result.reasoning, 1):
+            print(f"--- thinking (step {step}) ---", file=sys.stderr)
+            print(block, file=sys.stderr)
+    answer = result.answer or f"[{result.outcome}] {result.message}"
+    if stream_enabled and result.answer and result.answer.strip() in "".join(streamed_text):
+        print(flush=True)  # answer already streamed incrementally
+    else:
+        print(answer, flush=True)
     usage = result.usage
     print(
         f"[usage] ↑{usage.prompt_tokens} ↓{usage.completion_tokens} Σ{usage.total_tokens}",
         file=sys.stderr,
     )
+    print(f"[session] {session_path}", file=sys.stderr)
     if result.loop_result is not None:
         loop_result = result.loop_result
         print(

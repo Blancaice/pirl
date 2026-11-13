@@ -154,3 +154,37 @@ def test_list_runs_tool(tmp_path):
 def test_unknown_tool(tmp_path):
     result = _registry(tmp_path).execute("nope", {})
     assert result.error == "unknown tool: nope"
+
+def test_exec_is_registered_but_never_advertised(tmp_path):
+    reg = ToolRegistry(tmp_path, builtin_tools(), approval_mode="auto")
+    names = {spec.name for spec in reg.specs()}
+    assert "bash" in names
+    assert "exec" not in names
+    # The host keeps the dispatcher: verification and plugins still use it.
+    assert reg.execute("exec", {"argv": ["printf", "ok"]}).content == "ok"
+
+
+def test_bash_is_parallel_safe(tmp_path):
+    reg = _registry(tmp_path)
+    assert reg.can_parallel(["bash", "read_file"])
+    assert not reg.can_parallel(["bash", "write_file"])
+
+
+def test_absolute_paths_inside_the_workspace_are_allowed(tmp_path):
+    (tmp_path / "a.txt").write_text("hello\n", encoding="utf-8")
+    result = _registry(tmp_path).execute("bash", {"command": f"cat {tmp_path}/a.txt"})
+    assert result.error == ""
+    assert "hello" in result.content
+
+
+def test_absolute_paths_outside_the_workspace_are_rejected(tmp_path):
+    result = _registry(tmp_path).execute("bash", {"command": "cat /etc/hostname"})
+    assert "outside workspace" in result.error
+
+
+def test_bookkeeping_directory_is_not_model_readable(tmp_path):
+    (tmp_path / ".pirl").mkdir()
+    (tmp_path / ".pirl" / "plan.json").write_text("{}", encoding="utf-8")
+    reg = _registry(tmp_path)
+    assert "bookkeeping" in reg.execute("read_file", {"path": ".pirl/plan.json"}).error
+    assert ".pirl" not in reg.execute("list_files", {"path": "."}).content

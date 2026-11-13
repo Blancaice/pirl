@@ -21,8 +21,12 @@ pirl/
 ├── loop.py          # B6: 自生成闭环 + 效用统计 + 定期退役
 ├── llm.py           # 零依赖 OpenAI 兼容 chat client(urllib)
 ├── generate.py      # 真实 generate_skill:模型输出 → Proposal(JSON 契约 + 解析 + 校验)
-├── tools.py         # 工作区文件工具 + 结构化 exec/legacy bash + ToolRegistry
+├── tools.py         # 工作区文件工具 + 单一执行工具 bash + ToolRegistry
 ├── agent.py         # turn loop:section 化系统提示 + 工具执行 + trace + 结构化进度事件 + 自生成
+├── session.py       # append-only JSONL journal:entry 树 / projection / context_edit / compaction
+├── context.py       # 派生模型视图:去重 → 哈希外置 → 高水位摘要(含确定性回退)
+├── checkpoint.py    # 单文件快照 + identity 校验(主 journal 已改为 session.py)
+├── plugins/compaction.py # 确定性切点 / token 计数 / 结构化摘要 / 失败判定
 ├── run_memory.py    # 跨 run 记忆(追加 section,不碰 persona)
 ├── env.py           # 最小 .env 加载(不覆盖已 export 的变量,值按字面量)
 ├── ui.py            # ui.confirm / ui.select(TTY 感知,非交互回退)
@@ -45,8 +49,17 @@ tests/               # pytest 测试(192 个用例)
 - **LLM 重试**:429/5xx/超时指数退避 + 抖动,尊重 `Retry-After`。
 - **确定性验证**:`run --verify "python -m pytest"` 在任务后用退出码判定成败。
 - **token 统计**:跨步骤累加 `usage`(prompt/completion/total),结束打到 stderr。
-- **分层上下文压缩**:完整消息轨迹保留给 checkpoint/审计；每轮只派生模型输入。同一路径+内容哈希的重复读取只保留一份正文，大输出与旧写入正文按哈希外置到 `.pirl/objects/`，80% 高水位后才用 LLM 蒸馏旧轨迹(保留 decisions/constraints/failures/facts)，摘要连续失败则熔断并退回确定性有界尾部；system 前缀永不改写。
+- **Append-only session journal**:`.pirl/sessions/<ts>_<id>.jsonl` 是唯一事实来源——消息、compaction 边界、context edit、模型切换、usage 全部追加写入，永不重写。每轮模型输入由 `SessionManager.projection()` 从当前分支派生，因此压缩可逆、可审计、可回放。
+- **三层上下文压缩**:L1 大输出与旧写入正文按哈希外置到 `.pirl/objects/`(可重新取回,渲染只取决于该消息自身内容 → 永不漂移)；L2 重复观察折叠为 `dedupe=True` 显式开关(**默认关**——它会重写更早的消息,从该位置起 prompt cache 全部失效,省下的 token 不值一次重算)；L3 仅在 `window - reserveTokens` 高水位后用 LLM 蒸馏旧轨迹。**切点、token 计数、边界全部确定**，只有摘要文本来自模型；摘要若 `finish_reason=length`/provider 报错/试图调工具/为空，一律拒绝落盘(`SummarizationError`)并退回确定性有界尾部，`max_summary_failures` 后熔断。system 前缀永不进入摘要。
+- **前缀字节稳定(为 KV cache 服务)**:已发送过的消息在后续请求中渲染为相同字节,除非一次 compaction 整段替换。这是 prompt cache 能命中的前提；任何"每轮重算旧消息"的优化都会把 prefill 成本乘回去。
+- **流式 + 实时思考**:`ChatClient.stream()` 走真 SSE(`stream=true`),文本增量走 `on_text`、思考增量走 `on_reasoning`;CLI 默认开启,思考内容随生成实时显示,不再等到结束后回放。
+- **显式失败路径**:provider 报 context overflow 或 `stop_reason=length` 时允许**恰好一次** compact-and-retry；失败则保留 journal 原样、不追加 compaction，并以 `context overflow recovery failed: ...` 终止，不做隐式截断。
 - **交互审核**:`run` 生成候选后询问 `[a]ctivate/[r]eject/[s]kip`;另有 `review` / `reject` 命令。
+- **单一执行工具**:模型只看到 `bash`(和 pi/dsh 一样),`exec(argv)` 仅作为宿主内部通道保留(验证器、插件),不再发给模型——两套执行原语并存时模型会在两者之间来回试探。
+- **并发工具调用**:同一轮里的多个只读工具或 `bash` 会并发执行(`max_tool_workers`,默认 4);`write_file`/`apply_patch` 仍串行,混入写调用的批次整体串行。
+- **循环守卫常开**:重复调用、无新证据、无文件进展都会先给一次转向提示("停止调查,要么 finish,要么说清还缺哪个检查"),再犯即终止;`--max-steps` 只是外层上限,不再把守卫关掉。
+- **`.pirl/` 对模型不可见**:文件工具拒绝读写 `.pirl/`(session journal、run 历史、object store),`list_files`/`search` 也跳过它——否则模型会把自己的历史当成任务线索,越查越像有内幕。
+- **路径边界按真实路径判定**:命令里的绝对路径先 `resolve()` 再看是否在工作区内,而不是拿 `/home`、`/etc` 之类前缀正则硬匹配(工作区在 `/home` 下时,旧规则会拒绝工作区自己的路径)。
 
 ## A 部分实现要点(照抄 pi)
 
@@ -155,7 +168,7 @@ print(res.status, res.name, res.message)
 
 ## Agent 运行时(D 之后第 2 片)
 
-`tools.py` 提供工作区受限的五个工具(路径逃逸会被拒绝,输出截断),`agent.py`
+`tools.py` 提供工作区受限的文件工具和一个执行工具 `bash`(路径逃逸会被拒绝,输出截断),`agent.py`
 把 Part A(skills 进系统提示)和 Part B(末尾自生成)接在一个 turn loop 上。
 循环结束条件:模型给出纯文本答复(视为 success),或调用 `finish` 工具
 (`success` true/false)。skill 效用统计已自动接线:模型 `read_file` 命中 active
@@ -166,18 +179,13 @@ export PIRL_BASE_URL=https://api.deepseek.com/v1
 export PIRL_API_KEY=...
 export PIRL_MODEL=deepseek-chat
 
-# Structured argv execution asks for approval by default. This changes only
-# process authorization; use a container when filesystem isolation is needed.
+# bash is the only execution tool and is on by default (direct host backend:
+# cwd is the workspace, no OS-level isolation).
 python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo
 
-# Auto mode skips per-process approval (it is not a sandbox).
-python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo --approval auto
-
-# Disable process execution entirely. `direct` is the default host backend.
+# Turn execution off entirely (the model can still read, search, and edit files).
+python -m pirl run "review the implementation" --cwd /path/to/repo --no-bash
 python -m pirl run "review the implementation" --cwd /path/to/repo --executor none
-
-# Legacy shell execution remains disabled by default; explicitly opt in when needed.
-python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo --allow-bash
 
 默认不限制 step 数；使用总 token、运行时间、工具调用数、费用和停滞检测控制运行边界。需要兼容旧行为时仍可传 `--max-steps N`。
 
@@ -188,7 +196,10 @@ python -m pirl run "fix the failing test in tests/" --cwd /path/to/repo --allow-
 
 ### 可插拔执行层
 
-模型始终调用同一个结构化工具：`exec({"argv": [...]})`。执行位置和外围控制由
+模型只调用一个执行工具:`bash({"command": "..."})`。`exec({"argv": [...]})` 仍是
+宿主内部通道(验证器、第三方插件、`--executor` 的 argv 入口),但不再出现在模型的工具表里。
+选中 `rust`/`none` 后端时,`bash` 会被包装成 `bash -c <command>` 走同一个执行器,所以
+换后端/禁用执行对模型是真实生效的。执行位置和外围控制由
 `Executor` 插件决定；内置 `direct` 直接使用宿主用户权限，`none` 禁止进程执行，
 设置 `PIRL_EXECUTOR` 后还可选择 `rust`。`PolicyExecutor`、`ApprovalExecutor` 和
 `AuditExecutor` 是可组合中间件。启动时会输出 backend、隔离声明、文件系统/网络

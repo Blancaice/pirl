@@ -1,6 +1,6 @@
 # pirl 状态记录
 
-> 最后更新:harness 抽取 + Agent 内核协议化 + rust-exec(commit `2fcb1a9`)。
+> 最后更新:context journal/projection 重构(append-only session + 确定性切点 + 显式失败路径)。
 > 参考:pi(`/home/blanca/pi-reference`)、dsh(`/home/blanca/deepseek-harness`)、
 > ai-agent-book skills(`context-engineering` / `context-compression` /
 > `loop-engineering` / `coding-agent-harness`)。
@@ -16,7 +16,9 @@ pirl 是一个本地 coding agent,核心是**可自生成的 skill 系统**:
 ## 已确立的设计原则(来自参考,贯穿代码)
 
 1. **静态前缀 + 追加**:system prompt 是有序 section(persona/rules/memory/skills),新内容**追加**、从不改写 persona(字节稳定,对 KV cache 友好)。
-2. **确定性走代码**:能用代码强制的约束(路径隔离、验证、回退)不写成 prompt——"约束 > 指导"。
+2. **journal 只追加,视图每次派生**:`.pirl/sessions/*.jsonl` 是唯一事实来源(`id`/`parentId` entry 树);compaction 只是在末尾追加一条带 `firstKeptEntryId` 的 entry,原始 entry 永不删除,模型输入由 `projection()` 重建。不确定性只允许出现在摘要文本一个点上。
+3. **确定性走代码**:能用代码强制的约束(路径隔离、验证、回退)不写成 prompt——"约束 > 指导"。
+4. **失败路径必须显式**:`stop_reason=length` 的摘要不落盘;overflow 只允许一次 compact-and-retry;压缩失败保留 journal 原样并带原因终止。
 3. **模型能提出完成,但不能批准完成**:`finish(success=true)` 由框架跑验证命令 gate,失败驳回 + 结构化错误喂回。
 4. **触发式/按需加载**:skill 正文、run 历史都是 name/摘要常驻、正文按需检索,不每次全量。
 5. **结构化事件**:loop 只发 `StepStart`/`ToolCalled`/`FinishCalled`,渲染交给 CLI(`match` 分派)。
@@ -36,6 +38,14 @@ pirl 是一个本地 coding agent,核心是**可自生成的 skill 系统**:
 | `db38bda` | 循环内验证器(finish gate)+ git 快照回退(`restore`) |
 | `a75899c` | compaction(阈值触发蒸馏旧 tool results) |
 | `2fcb1a9` | 运行时 harness 抽取 + Agent 内核协议化(Protocols)+ rust-exec 沙箱 + 安全默认(bash 默认关/ExecutionPolicy/脱敏/adopt_skill 归因/checkpoint/并行工具) |
+
+## 本轮修复(未提交,273 个用例)
+
+- **执行层收敛到单一 bash**:`exec` 从工具表下线(仍保留内部 dispatch),`bash` 可并发、可传 `timeout_seconds`;`--allow-bash` 变成兼容用的 no-op,新增 `--no-bash`。选中 `rust`/`none` 后端时 `bash` 走执行器 argv 通道。
+- **路径边界按 resolved path 判定**:删掉 `/etc|/home|...` 前缀正则,改为命令里绝对路径 `resolve()` 后与工作区比较,工作区自己的路径不再被误杀;补 `~`、`$HOME`、`..` 三类逃逸模式。
+- **`.pirl/` 退出模型视野**:文件工具拒绝读写,`list_files`/`search` 跳过;`pirl-demo` 里旧的 journal/objects/runs/plan.json 已清理。
+- **循环守卫与 `--max-steps` 解耦**:重复调用、无新证据(只读轮)、无文件进展都会先提示再终止;read-only 轮不再被当成"没有停滞"。
+- 断言更新:新增 exec 不下发、bash 并发、工作区绝对路径放行、`.pirl` 不可读、只读重复收尾、step cap 不禁用守卫 6 组用例。
 
 ## 需要做的(按优先级)
 
@@ -65,7 +75,7 @@ pirl 是一个本地 coding agent,核心是**可自生成的 skill 系统**:
 ```
 scan / prompt / expand          # Part A:发现 / 渐进披露 / 展开
 init / ls / activate / reject / review / retire / verify   # Part B:生命周期
-run [--cwd] [--max-steps] [--verify CMD] [--allow-bash]   # 端到端(bash 默认关)
+run [--cwd] [--max-steps] [--verify CMD] [--no-bash]      # 端到端(bash 默认开,exec 仅内部)
 restore <run_id> [--cwd]        # git 回退
 ```
 

@@ -79,6 +79,7 @@ class Completion:
     tool_calls: List[ToolCall] = field(default_factory=list)
     reasoning: str = ""  # model's thinking/reasoning, empty for non-reasoning models
     usage: Usage = field(default_factory=Usage)
+    stop_reason: str = ""  # provider finish_reason: "stop" | "length" | "tool_calls" | ...
 
 
 @dataclass(frozen=True)
@@ -129,13 +130,7 @@ class ChatClient:
         Retries transient failures (429, 5xx, connection/timeout) with
         exponential backoff + jitter, honouring ``Retry-After`` when present.
         """
-        payload: Dict[str, Any] = {
-            "model": self.model,
-            "messages": list(messages),
-            "temperature": 0.0,
-        }
-        if tools:
-            payload["tools"] = [_tool_spec_to_payload(t) for t in tools]
+        payload = self._payload(messages, tools)
 
         body = json.dumps(payload).encode("utf-8")
 
@@ -176,26 +171,168 @@ class ChatClient:
 
         raise LLMError("retries exhausted")  # pragma: no cover - unreachable
 
+    def _payload(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        tools: Sequence[ToolSpec] = (),
+        *,
+        stream: bool = False,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": list(messages),
+            "temperature": 0.0,
+        }
+        if tools:
+            payload["tools"] = [_tool_spec_to_payload(t) for t in tools]
+        if stream:
+            payload["stream"] = True
+            # Ask for the final usage chunk; providers that ignore it do no harm.
+            payload["stream_options"] = {"include_usage": True}
+        return payload
+
     def stream(
         self,
         messages: Sequence[Dict[str, Any]],
         *,
         tools: Sequence[ToolSpec] = (),
         on_delta: Any | None = None,
+        on_reasoning: Any | None = None,
+        max_retries: int = 3,
     ) -> Completion:
-        """Streaming-compatible facade.
+        """Stream one chat-completions request and return the assembled message.
 
-        Providers without an SSE adapter still get a single final delta. The
-        runner can depend on this interface now; a provider-specific client
-        may override it with true incremental chunks later.
+        Emits text deltas to ``on_delta`` and thinking deltas to ``on_reasoning``
+        as they arrive, so the caller can render progress instead of waiting for
+        the whole response. Tool-call arguments are accumulated per index.
         """
-        completion = self.complete(messages, tools=tools)
-        if on_delta is not None and completion.text:
-            on_delta(completion.text)
-        return completion
+        body = json.dumps(self._payload(messages, tools, stream=True)).encode("utf-8")
+        emitted = {"value": False}
+
+        def mark_emitted() -> None:
+            emitted["value"] = True
+
+        for attempt in range(max_retries + 1):
+            request = urllib.request.Request(
+                self.base_url + "/chat/completions",
+                data=body,
+                method="POST",
+                headers={
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream",
+                    "Authorization": f"Bearer {self.api_key}",
+                },
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    return _consume_stream(
+                        response,
+                        on_delta=on_delta,
+                        on_reasoning=on_reasoning,
+                        mark_emitted=mark_emitted,
+                    )
+            except urllib.error.HTTPError as error:
+                detail = error.read().decode("utf-8", "replace")
+                if _retryable_status(error.code) and attempt < max_retries and not emitted["value"]:
+                    time.sleep(_retry_delay(error, attempt))
+                    continue
+                raise LLMHTTPError(error.code, detail) from error
+            except (urllib.error.URLError, TimeoutError) as error:
+                if attempt < max_retries and not emitted["value"]:
+                    time.sleep(_backoff(attempt))
+                    continue
+                if isinstance(error, TimeoutError):
+                    if self.timeout is None:
+                        raise LLMError("provider request timed out") from error
+                    raise LLMError(
+                        f"provider request timed out after {self.timeout:g} seconds"
+                    ) from error
+                raise LLMError(f"cannot reach provider: {error.reason}") from error
+
+        raise LLMError("retries exhausted")  # pragma: no cover - unreachable
 
     def __repr__(self) -> str:
         return f"ChatClient(base_url={self.base_url!r}, model={self.model!r})"
+
+
+def _consume_stream(
+    response: Any,
+    *,
+    on_delta: Any | None = None,
+    on_reasoning: Any | None = None,
+    mark_emitted: Any | None = None,
+) -> Completion:
+    """Parse an SSE response into one :class:`Completion`."""
+    text_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    calls: Dict[int, Dict[str, Any]] = {}
+    stop_reason = ""
+    usage = Usage()
+
+    def emit_text(chunk: str) -> None:
+        text_parts.append(chunk)
+        if mark_emitted is not None:
+            mark_emitted()
+        if on_delta is not None and chunk:
+            on_delta(chunk)
+
+    for raw_line in response:
+        line = raw_line.decode("utf-8", "replace") if isinstance(raw_line, bytes) else str(raw_line)
+        line = line.strip()
+        if not line or line.startswith(":"):
+            continue
+        if not line.startswith("data:"):
+            continue
+        data = line[len("data:"):].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(chunk.get("usage"), dict):
+            usage = Usage(
+                prompt_tokens=int(chunk["usage"].get("prompt_tokens") or 0),
+                completion_tokens=int(chunk["usage"].get("completion_tokens") or 0),
+                total_tokens=int(chunk["usage"].get("total_tokens") or 0),
+            )
+
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") or {}
+            thinking = delta.get("reasoning_content") or delta.get("reasoning") or ""
+            if thinking:
+                reasoning_parts.append(str(thinking))
+                if on_reasoning is not None:
+                    on_reasoning(str(thinking))
+            content = delta.get("content") or ""
+            if content:
+                emit_text(str(content))
+            for call in delta.get("tool_calls") or []:
+                index = int(call.get("index") or 0)
+                entry = calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+                if call.get("id"):
+                    entry["id"] = str(call["id"])
+                function = call.get("function") or {}
+                if function.get("name"):
+                    entry["name"] = str(function["name"])
+                if function.get("arguments"):
+                    entry["arguments"] += str(function["arguments"])
+            if choice.get("finish_reason"):
+                stop_reason = str(choice["finish_reason"])
+
+    tool_calls = [
+        ToolCall(name=calls[index]["name"], arguments=calls[index]["arguments"], id=calls[index]["id"])
+        for index in sorted(calls)
+        if calls[index]["name"]
+    ]
+    return Completion(
+        text="".join(text_parts),
+        tool_calls=tool_calls,
+        reasoning="".join(reasoning_parts),
+        usage=usage,
+        stop_reason=stop_reason,
+    )
 
 
 def _parse_completion(raw: str) -> Completion:
@@ -239,8 +376,14 @@ def _parse_completion(raw: str) -> Completion:
         total_tokens=int(usage_raw.get("total_tokens") or 0),
     )
 
+    stop_reason = str(data.get("choices", [{}])[0].get("finish_reason") or "")
+
     return Completion(
-        text=text, tool_calls=tool_calls, reasoning=reasoning, usage=usage
+        text=text,
+        tool_calls=tool_calls,
+        reasoning=reasoning,
+        usage=usage,
+        stop_reason=stop_reason,
     )
 
 

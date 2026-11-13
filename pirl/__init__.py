@@ -92,13 +92,29 @@ from .plugins.memory import memory_path, read_memory, write_memory
 from .run_history import RunRecord, RunStore
 from .plugins.git_safety import GitSnapshot, is_git, restore, snapshot
 from .plugins.compaction import (
+    DEFAULT_KEEP_RECENT_TOKENS,
+    DEFAULT_RESERVE_TOKENS,
+    CompactionPreparation,
+    SummarizationError,
     compact,
     default_summarizer,
+    estimate_context_tokens,
     estimate_messages_tokens,
     estimate_tokens,
+    find_cut_point,
+    prepare_compaction,
+    should_compact,
 )
 from .env import load_dotenv
-from .context import ContextManager
+from .context import CompactionRecord, ContextManager, ContextView
+from .session import (
+    ProjectedEntry,
+    SessionError,
+    SessionManager,
+    SessionStore,
+    default_session_path,
+    latest_session_path,
+)
 from .verification import CommandVerifier
 from .checkpoint import CheckpointStore
 from .plugins.hooks import SelfGenerationHook, SkillUsageHook
@@ -200,8 +216,24 @@ __all__ = [
     "default_summarizer",
     "estimate_messages_tokens",
     "estimate_tokens",
+    "estimate_context_tokens",
+    "should_compact",
+    "find_cut_point",
+    "prepare_compaction",
+    "CompactionPreparation",
+    "SummarizationError",
+    "DEFAULT_RESERVE_TOKENS",
+    "DEFAULT_KEEP_RECENT_TOKENS",
     "load_dotenv",
     "ContextManager",
+    "ContextView",
+    "CompactionRecord",
+    "SessionManager",
+    "SessionStore",
+    "ProjectedEntry",
+    "SessionError",
+    "default_session_path",
+    "latest_session_path",
     "CommandVerifier",
     "CheckpointStore",
     "SkillUsageHook",

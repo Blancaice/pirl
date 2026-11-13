@@ -1,3 +1,5 @@
+import json
+
 from pirl.agent import Agent
 from pirl.llm import Completion, ToolCall, Usage
 from pirl.tools import ToolRegistry, builtin_tools
@@ -9,6 +11,16 @@ class Client:
 
     def complete(self, messages, tools=None):
         return self.responses.pop(0)
+
+
+class RecordingClient(Client):
+    def __init__(self, responses):
+        super().__init__(responses)
+        self.calls = []
+
+    def complete(self, messages, tools=None):
+        self.calls.append((messages, tools))
+        return super().complete(messages, tools)
 
 
 def test_default_has_no_step_cap_but_repeat_guard_stops(tmp_path):
@@ -42,3 +54,33 @@ def test_read_only_exploration_does_not_count_as_stagnation(tmp_path):
     result = agent.run("inspect the project")
     assert result.outcome == "success"
     assert result.answer == "The files look correct."
+
+def test_read_only_repetition_is_steered_and_then_stopped(tmp_path):
+    calls = [
+        Completion(
+            "",
+            [ToolCall("bash", json.dumps({"command": f"printf {index}"}), f"c{index}")],
+            )
+        for index in range(6)
+    ]
+    agent = Agent(
+        Client(calls),
+        tools=ToolRegistry(tmp_path, builtin_tools()),
+        no_progress_limit=1,
+    )
+    result = agent.run("x")
+    assert result.outcome == "failure"
+    assert result.message == "no new evidence"
+
+
+def test_step_cap_no_longer_disables_the_loop_guards(tmp_path):
+    client = RecordingClient(
+        [Completion("", [ToolCall("list_files", '{"path": "."}')])] * 10
+    )
+    agent = Agent(client, tools=ToolRegistry(tmp_path, builtin_tools()), max_steps=8)
+    result = agent.run("x")
+    assert result.message == "repeated tool call detected"
+    assert any(
+        "Stop investigating" in str(message.get("content"))
+        for message in client.calls[3][0]
+    )

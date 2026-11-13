@@ -25,7 +25,9 @@ from .llm import ToolSpec
 from .run_history import RunStore
 
 MAX_OUTPUT = 20_000
-_SEARCH_SKIP = frozenset({".git", "__pycache__", ".venv", "node_modules", ".pytest_cache"})
+_SEARCH_SKIP = frozenset({".git", ".pirl", "__pycache__", ".venv", "node_modules", ".pytest_cache"})
+BOOKKEEPING_DIR = ".pirl"
+
 
 
 @dataclass(frozen=True)
@@ -63,13 +65,22 @@ class ExecutionPolicy:
     deny_patterns: tuple[str, ...] = (
         r"\brm\s+(-[^\s]*f[^\s]*\s+)*-?r",
         r"\bgit\s+reset\s+--hard\b",
-        r"\b(curl|wget|ssh|scp|nc|telnet)\b",
-        r"(?:^|[\s;|&])/(?:etc|home|root|proc|sys|dev)(?:/|\b)",
+        r"\b(curl|wget|ssh|scp|nc|telnet|sudo|mkfs(?:\.\w+)?|shutdown|reboot)\b",
+        r"\bdd\s+if=",
+        # Home-relative escapes. Absolute paths are checked against the
+        # workspace by :class:`ToolRegistry`, never by a path-prefix regex:
+        # a workspace living under /home must not match its own deny rule.
+        r"(?:^|[\s;|&])~(?=/|$|\s)",
+        r"\$\{?HOME\b",
+        r"(?:^|[\s;|&])\.\.(?=/|$|\s)",
     )
 
     def check_bash(self, command: str) -> str:
         if not self.allow_bash:
-            return "bash execution disabled by policy"
+            return (
+                "bash execution disabled by policy (this host turned process "
+                "execution off; see --executor / --no-bash)"
+            )
         for pattern in self.deny_patterns:
             if re.search(pattern, command, flags=re.IGNORECASE):
                 return f"bash command rejected by policy: {pattern}"
@@ -97,6 +108,9 @@ class Tool:
     parameters: Dict[str, Any]
     execute: Callable[[Dict[str, Any], Path], ToolResult]
     parallel_safe: bool = False
+    # Internal dispatchers (``exec``) stay registered for the host but are
+    # never advertised to the model: one execution tool is the whole point.
+    model_facing: bool = True
 
     def to_spec(self) -> ToolSpec:
         return ToolSpec(self.name, self.description, self.parameters)
@@ -129,7 +143,8 @@ class ToolRegistry:
         self._tools: Dict[str, Tool] = {t.name: t for t in tools}
 
     def specs(self) -> List[ToolSpec]:
-        return [t.to_spec() for t in self._tools.values()]
+        """Only tools the model may call; internal dispatchers stay hidden."""
+        return [t.to_spec() for t in self._tools.values() if t.model_facing]
 
     def can_parallel(self, names: Sequence[str]) -> bool:
         """Only explicitly read-only tools may run concurrently."""
@@ -146,6 +161,10 @@ class ToolRegistry:
             reason = self.policy.check_bash(command)
             if reason:
                 return ToolResult("", reason)
+            escape = _outside_workspace(self.workspace, command)
+            if escape:
+                return ToolResult("", escape)
+            return self._run_bash(args)
         if name == "exec":
             argv = args.get("argv")
             if (
@@ -157,6 +176,9 @@ class ToolRegistry:
             timeout = args.get("timeout_seconds", 60)
             if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 600:
                 return ToolResult("", "timeout_seconds must be an integer between 1 and 600")
+            escape = _outside_workspace(self.workspace, shlex.join(argv))
+            if escape:
+                return ToolResult("", escape)
             request = ExecRequest(
                 tuple(argv), self.workspace, str(args.get("reason", "")), timeout
             )
@@ -164,14 +186,7 @@ class ToolRegistry:
                 result = self.executor.execute(request)
             except Exception as exc:
                 return ToolResult("", f"executor failed: {exc}")
-            content = result.stdout
-            if result.stderr:
-                content += ("\n[stderr]\n" if content else "[stderr]\n") + result.stderr
-            if result.error and not content:
-                return ToolResult("", result.error)
-            error = "" if result.ok else result.error or f"exit {result.exit_code}"
-            display = content or f"(no output, exit {result.exit_code})"
-            return ToolResult(_truncate(display), error)
+            return _render_exec(result)
         patch_executor = self.executor
         while hasattr(patch_executor, "inner"):
             patch_executor = patch_executor.inner
@@ -186,6 +201,33 @@ class ToolRegistry:
         except Exception as exc:  # noqa: BLE001 - tool impls touch fs/process
             return ToolResult("", f"tool {name} raised: {exc}")
 
+    def _run_bash(self, args: Dict[str, Any]) -> ToolResult:
+        """Run one shell command through the host or the configured backend.
+
+        The host backend runs the shell directly (``cwd=workspace``). Any other
+        backend (``rust``, ``none``) receives the shell as argv, so selecting a
+        sandbox or disabling execution actually applies to the model's only
+        execution tool.
+        """
+        command = str(args.get("command", ""))
+        timeout = args.get("timeout_seconds", 60)
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 600:
+            return ToolResult("", "timeout_seconds must be an integer between 1 and 600")
+        backend = self.executor
+        while hasattr(backend, "inner"):
+            backend = backend.inner
+        name = getattr(getattr(backend, "info", None), "name", "direct")
+        if name not in ("rust", "none"):
+            return _bash(args, self.workspace, timeout)
+        shell = shutil.which("bash") or os.environ.get("SHELL") or "/bin/sh"
+        request = ExecRequest(
+            (shell, "-c", command), self.workspace, str(args.get("reason", "")), timeout
+        )
+        try:
+            return _render_exec(self.executor.execute(request))
+        except Exception as exc:  # noqa: BLE001 - plugins may raise anything
+            return ToolResult("", f"executor failed: {exc}")
+
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -198,6 +240,63 @@ def _truncate(text: str, limit: int = MAX_OUTPUT) -> str:
     head = text[: limit // 2]
     tail = text[-(limit // 2) :]
     return f"{head}\n... [truncated {len(text) - limit} chars] ...\n{tail}"
+
+
+_ABSOLUTE_PATH = re.compile(r"""(?<![\w.~$/-:])(/[^\s;|&<>()'"`$]*)""")
+_TRAILING_JUNK = ".,:;)]}"
+
+
+def _absolute_paths(text: str) -> List[str]:
+    """Absolute-path-looking tokens in a command string."""
+    found: List[str] = []
+    for raw in _ABSOLUTE_PATH.findall(text):
+        candidate = raw.rstrip(_TRAILING_JUNK)
+        if candidate and candidate != "/":
+            found.append(candidate)
+    return found
+
+
+def _outside_workspace(workspace: Path, text: str) -> str:
+    """Reject paths outside the workspace; ``""`` means every path is inside.
+
+    This is a boundary check on resolved paths, not a regex on path prefixes:
+    a workspace under ``/home/...`` must be allowed to name itself.
+    """
+    for raw in _absolute_paths(text):
+        try:
+            resolved = Path(raw).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if not resolved.is_relative_to(workspace):
+            return f"path outside workspace: {raw}"
+    return ""
+
+
+def _render_exec(result: Any) -> ToolResult:
+    """Shared rendering for anything the executor ran (exec, bash backends)."""
+    content = result.stdout
+    if result.stderr:
+        content += ("\n[stderr]\n" if content else "[stderr]\n") + result.stderr
+    if result.error and not content:
+        return ToolResult("", result.error)
+    error = "" if result.ok else result.error or f"exit {result.exit_code}"
+    display = content or f"(no output, exit {result.exit_code})"
+    return ToolResult(_truncate(display), error)
+
+
+def _visible_path(workspace: Path, raw: str) -> tuple[Optional[Path], str]:
+    """Resolve a model-facing path; reject escapes and pirl's own bookkeeping."""
+    target = _resolve(workspace, raw)
+    if target is None:
+        return None, "path escapes workspace"
+    try:
+        target.relative_to(workspace / BOOKKEEPING_DIR)
+    except ValueError:
+        return target, ""
+    return None, (
+        f"{BOOKKEEPING_DIR}/ holds pirl's own bookkeeping (session journal, run "
+        "history, object store); it is not task content. Leave it alone."
+    )
 
 
 def _resolve(workspace: Path, raw: str) -> Optional[Path]:
@@ -217,22 +316,24 @@ def _resolve(workspace: Path, raw: str) -> Optional[Path]:
 
 
 def _list_files(args: Dict[str, Any], workspace: Path) -> ToolResult:
-    target = _resolve(workspace, args.get("path", "."))
+    target, error = _visible_path(workspace, args.get("path", "."))
     if target is None:
-        return ToolResult("", "path escapes workspace")
+        return ToolResult("", error)
     if not target.is_dir():
         return ToolResult("", f"not a directory: {args.get('path', '.')}")
     lines = []
     for name in sorted(os.listdir(target)):
+        if name == BOOKKEEPING_DIR:
+            continue
         marker = "d " if (target / name).is_dir() else "  "
         lines.append(marker + name)
     return ToolResult("\n".join(lines) or "(empty)")
 
 
 def _read_file(args: Dict[str, Any], workspace: Path) -> ToolResult:
-    target = _resolve(workspace, str(args.get("path", "")))
+    target, error = _visible_path(workspace, str(args.get("path", "")))
     if target is None:
-        return ToolResult("", "path escapes workspace")
+        return ToolResult("", error)
     if not target.is_file():
         return ToolResult("", f"not a file: {args.get('path', '')}")
     try:
@@ -253,9 +354,9 @@ def _write_file(args: Dict[str, Any], workspace: Path) -> ToolResult:
     content = args.get("content", "")
     if not isinstance(content, str):
         return ToolResult("", "content must be a string")
-    target = _resolve(workspace, str(args.get("path", "")))
+    target, error = _visible_path(workspace, str(args.get("path", "")))
     if target is None:
-        return ToolResult("", "path escapes workspace")
+        return ToolResult("", error)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
@@ -268,9 +369,9 @@ def _search(args: Dict[str, Any], workspace: Path) -> ToolResult:
     pattern = args.get("pattern", "")
     if not isinstance(pattern, str) or not pattern:
         return ToolResult("", "pattern is required")
-    root = _resolve(workspace, str(args.get("path", ".")))
+    root, error = _visible_path(workspace, str(args.get("path", ".")))
     if root is None:
-        return ToolResult("", "path escapes workspace")
+        return ToolResult("", error)
 
     # Prefer ripgrep for large repositories; retain the pure-Python fallback
     # for minimal hosts where rg is unavailable.
@@ -318,7 +419,7 @@ def _search(args: Dict[str, Any], workspace: Path) -> ToolResult:
     return ToolResult(_truncate("\n".join(hits)) if hits else "no matches")
 
 
-def _bash(args: Dict[str, Any], workspace: Path) -> ToolResult:
+def _bash(args: Dict[str, Any], workspace: Path, timeout: int = 60) -> ToolResult:
     command = args.get("command", "")
     if not isinstance(command, str) or not command.strip():
         return ToolResult("", "command is required")
@@ -333,11 +434,11 @@ def _bash(args: Dict[str, Any], workspace: Path) -> ToolResult:
             start_new_session=True,
         )
         try:
-            stdout, stderr = proc.communicate(timeout=60)
+            stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
-            return ToolResult("", "command timed out after 60s")
+            return ToolResult("", f"command timed out after {timeout}s")
     except OSError as exc:
         return ToolResult("", str(exc))
 
@@ -490,18 +591,29 @@ def builtin_tools() -> List[Tool]:
                 "required": ["argv"],
             },
             lambda _args, _workspace: ToolResult("", "exec must be dispatched by ToolRegistry"),
+            model_facing=False,
         ),
         Tool(
             "bash",
-            "Run a shell command with cwd set to the workspace.",
+            "Run a shell command with cwd set to the workspace. Pipes, "
+            "redirection, and cd are available; output is truncated to the "
+            "last 20k chars.",
             {
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Shell command to run"},
+                    "reason": {"type": "string", "description": "Why this command is needed"},
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 600,
+                        "description": "Command timeout, default 60 seconds",
+                    },
                 },
                 "required": ["command"],
             },
             _bash,
+            True,
         ),
         Tool(
             "apply_patch",
